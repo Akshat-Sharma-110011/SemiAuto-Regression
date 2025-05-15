@@ -1,8 +1,11 @@
 dataset_name: gym
-original_file_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\external\gym.csv
-processed_timestamp: '2025-05-15 03:48:56'
 feature_store_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\references\feature_store_gym\feature_store.yaml
-train_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_gym\train.csv
-test_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_gym\test.csv
+original_file_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\external\gym.csv
 plots_dir: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports/figures\plots_gym
+preprocessing_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\models\pipelines\preprocessing_gym\preprocessing.pkl
+processed_timestamp: '2025-05-15 17:17:54'
 target_column: BMI
+test_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_gym\test.csv
+test_preprocessed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\data\interim\data_gym\test_preprocessed.csv
+train_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_gym\train.csv
+train_preprocessed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\data\interim\data_gym\train_preprocessed.csv
