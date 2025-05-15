@@ -1068,7 +1068,7 @@ def main():
         train_preprocessed_path = os.path.join(interim_dir, 'train_preprocessed.csv')
         test_preprocessed_path = os.path.join(interim_dir, 'test_preprocessed.csv')
 
-        pipeline_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'models', 'pipelines',
+        pipeline_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'model', 'pipelines',
                                     f'preprocessing_{dataset_name}')
         os.makedirs(pipeline_dir, exist_ok=True)
 

@@ -15,3 +15,6 @@ matplotlib
 seaborn
 cloudpickle
 featuretools
+xgboost
+lightgbm
+catboost
