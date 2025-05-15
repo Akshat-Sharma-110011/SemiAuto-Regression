@@ -1,231 +1,276 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
-This module handles the model selection and training for the AutoML regression pipeline.
-It supports various regression models and hyperparameter tuning.
+This script handles model selection, training, and storing for regression problems.
+It provides a selection of regression models including advanced ensemble models,
+allows for custom hyperparameter tuning, and stores the trained model.
 """
 
 import os
+import sys
 import yaml
 import pandas as pd
 import numpy as np
 import cloudpickle
 from pathlib import Path
-import sys
-
-# Add parent directory to path to import logger
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.logger import section, configure_logger
-import logging
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 # Import regression models
 from sklearn.linear_model import (
-    LinearRegression, Ridge, Lasso, ElasticNet,
-    HuberRegressor, SGDRegressor, BayesianRidge
+    LinearRegression, Ridge, Lasso, ElasticNet, SGDRegressor,
+    BayesianRidge, HuberRegressor, RANSACRegressor
 )
-from sklearn.svm import SVR
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import (
     RandomForestRegressor, GradientBoostingRegressor,
-    AdaBoostRegressor, ExtraTreesRegressor,
-    VotingRegressor, StackingRegressor
+    AdaBoostRegressor, ExtraTreesRegressor
 )
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.svm import SVR
 from sklearn.neural_network import MLPRegressor
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, ConstantKernel
-from sklearn.cross_decomposition import PLSRegression
 
 # Import advanced ensemble models
 try:
     import xgboost as xgb
-    from xgboost import XGBRegressor
-
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
 
 try:
     import lightgbm as lgb
-    from lightgbm import LGBMRegressor
-
     LIGHTGBM_AVAILABLE = True
 except ImportError:
     LIGHTGBM_AVAILABLE = False
 
 try:
     import catboost as cb
-    from catboost import CatBoostRegressor
-
     CATBOOST_AVAILABLE = True
 except ImportError:
     CATBOOST_AVAILABLE = False
 
-# Configure logger
+# Import the custom logger
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from logger import section, configure_logger
+import logging
+
 logger = logging.getLogger(__name__)
 configure_logger()
 
-
 class ModelBuilder:
-    """Class to handle model selection, training, and persistence."""
+    """
+    A class to build, tune, and save regression models for the AutoML pipeline.
+    """
 
-    def __init__(self, intel_path='intel.yaml'):
+    def __init__(self, intel_path: str = "intel.yaml"):
         """
-        Initialize the ModelBuilder with paths from intel.yaml.
+        Initialize ModelBuilder with paths from intel.yaml
 
         Args:
-            intel_path (str): Path to the intel.yaml file.
+            intel_path: Path to the intel.yaml file
         """
-        # Load intel file
-        section("Initializing Model Builder", logger)
+        section(f"Initializing ModelBuilder with intel file: {intel_path}", logger)
         self.intel_path = intel_path
         self.intel = self._load_intel()
+        self.dataset_name = self.intel.get('dataset_name')
+        self.target_column = self.intel.get('target_column')
 
-        # Extract necessary paths and info
-        self.dataset_name = self.intel['dataset_name']
-        self.target_column = self.intel['target_column']
-        self.train_transformed_path = self.intel['train_transformed_path']
-        self.test_transformed_path = self.intel['test_transformed_path']
+        # Load data paths
+        self.train_data_path = self.intel.get('train_transformed_path')
+        self.test_data_path = self.intel.get('test_transformed_path')
 
-        # Create model directory
-        project_root = Path(__file__).parent.parent.parent
-        self.model_dir = project_root / 'models' / f'model_{self.dataset_name}'
-        self.model_path = self.model_dir / 'model.pkl'
-        os.makedirs(self.model_dir, exist_ok=True)
+        # Setup model directory
+        self.model_dir = Path(f"models/model_{self.dataset_name}")
+        self.model_path = self.model_dir / "model.pkl"
 
-        # Available models dictionary with default parameters
-        self.models_dict = self._get_models_dict()
+        # Available models dictionary with their default parameters
+        self.available_models = self._get_available_models()
 
-        logger.info(f"Model builder initialized for dataset: {self.dataset_name}")
+        logger.info(f"ModelBuilder initialized for dataset: {self.dataset_name}")
         logger.info(f"Target column: {self.target_column}")
-        logger.info(f"Model will be saved to: {self.model_path}")
 
-    def _load_intel(self):
-        """Load the intel file containing paths and configurations."""
+    def _load_intel(self) -> Dict[str, Any]:
+        """Load the intel.yaml file"""
         try:
             with open(self.intel_path, 'r') as file:
-                return yaml.safe_load(file)
+                intel = yaml.safe_load(file)
+            logger.info(f"Successfully loaded intel from {self.intel_path}")
+            return intel
         except Exception as e:
             logger.error(f"Failed to load intel file: {e}")
             raise
 
-    def _get_models_dict(self):
+    def _get_available_models(self) -> Dict[str, Dict[str, Any]]:
         """
-        Create a dictionary of available regression models with their default parameters.
+        Get all available regression models with their default parameters
 
         Returns:
-            dict: Dictionary with model names as keys and (model_class, default_params) as values.
+            Dictionary of model names and their class/default parameters
         """
         models = {
-            # Linear models
-            'Linear Regression': (LinearRegression, {}),
-            'Ridge Regression': (Ridge, {'alpha': 1.0, 'max_iter': 1000}),
-            'Lasso Regression': (Lasso, {'alpha': 1.0, 'max_iter': 1000}),
-            'ElasticNet': (ElasticNet, {'alpha': 1.0, 'l1_ratio': 0.5, 'max_iter': 1000}),
-            'Huber Regressor': (HuberRegressor, {'epsilon': 1.35, 'alpha': 0.0001, 'max_iter': 100}),
-            'SGD Regressor': (SGDRegressor,
-                              {'loss': 'squared_error', 'penalty': 'l2', 'alpha': 0.0001, 'max_iter': 1000}),
-            'Bayesian Ridge': (BayesianRidge,
-                               {'n_iter': 300, 'alpha_1': 1e-6, 'alpha_2': 1e-6, 'lambda_1': 1e-6, 'lambda_2': 1e-6}),
-
-            # Support Vector Machines
-            'SVR': (SVR, {'kernel': 'rbf', 'C': 1.0, 'epsilon': 0.1, 'gamma': 'scale'}),
-
-            # Nearest Neighbors
-            'K-Neighbors Regressor': (KNeighborsRegressor,
-                                      {'n_neighbors': 5, 'weights': 'uniform', 'algorithm': 'auto'}),
-
-            # Decision Trees
-            'Decision Tree': (DecisionTreeRegressor,
-                              {'max_depth': None, 'min_samples_split': 2, 'min_samples_leaf': 1}),
-
-            # Ensemble Methods
-            'Random Forest': (RandomForestRegressor,
-                              {'n_estimators': 100, 'max_depth': None, 'min_samples_split': 2, 'min_samples_leaf': 1}),
-            'Gradient Boosting': (GradientBoostingRegressor,
-                                  {'n_estimators': 100, 'learning_rate': 0.1, 'max_depth': 3, 'min_samples_split': 2,
-                                   'min_samples_leaf': 1}),
-            'AdaBoost': (AdaBoostRegressor, {'n_estimators': 50, 'learning_rate': 1.0}),
-            'Extra Trees': (ExtraTreesRegressor,
-                            {'n_estimators': 100, 'max_depth': None, 'min_samples_split': 2, 'min_samples_leaf': 1}),
-
-            # Neural Networks
-            'MLP Regressor': (MLPRegressor,
-                              {'hidden_layer_sizes': (100,), 'activation': 'relu', 'solver': 'adam', 'alpha': 0.0001,
-                               'max_iter': 200}),
-
-            # Gaussian Processes
-            'Gaussian Process': (GaussianProcessRegressor,
-                                 {'kernel': ConstantKernel(1.0) * RBF(1.0), 'alpha': 1e-10, 'n_restarts_optimizer': 0}),
-
-            # Partial Least Squares
-            'PLS Regression': (PLSRegression, {'n_components': 2, 'scale': True, 'max_iter': 500}),
+            # Basic models
+            "Linear Regression": {
+                "class": LinearRegression,
+                "params": {"fit_intercept": True, "n_jobs": -1},
+                "description": "Standard linear regression model"
+            },
+            "Ridge Regression": {
+                "class": Ridge,
+                "params": {"alpha": 1.0, "fit_intercept": True, "max_iter": 1000},
+                "description": "Linear regression with L2 regularization"
+            },
+            "Lasso Regression": {
+                "class": Lasso,
+                "params": {"alpha": 1.0, "fit_intercept": True, "max_iter": 1000},
+                "description": "Linear regression with L1 regularization"
+            },
+            "ElasticNet": {
+                "class": ElasticNet,
+                "params": {"alpha": 1.0, "l1_ratio": 0.5, "fit_intercept": True, "max_iter": 1000},
+                "description": "Linear regression with combined L1 and L2 regularization"
+            },
+            "SGD Regressor": {
+                "class": SGDRegressor,
+                "params": {"loss": "squared_error", "penalty": "l2", "alpha": 0.0001, "max_iter": 1000},
+                "description": "Linear model fitted by minimizing a regularized loss function with SGD"
+            },
+            "Bayesian Ridge": {
+                "class": BayesianRidge,
+                "params": {"n_iter": 300, "alpha_1": 1e-6, "alpha_2": 1e-6},
+                "description": "Bayesian ridge regression with ARD prior"
+            },
+            "Huber Regressor": {
+                "class": HuberRegressor,
+                "params": {"epsilon": 1.35, "alpha": 0.0001, "max_iter": 100},
+                "description": "Regression model robust to outliers"
+            },
+            "RANSAC Regressor": {
+                "class": RANSACRegressor,
+                "params": {"min_samples": 0.1, "max_trials": 100},
+                "description": "RANSAC (RANdom SAmple Consensus) algorithm for robust regression"
+            },
+            # Tree-based models
+            "Decision Tree": {
+                "class": DecisionTreeRegressor,
+                "params": {"max_depth": 10, "min_samples_split": 2, "min_samples_leaf": 1},
+                "description": "Decision tree regressor"
+            },
+            "Random Forest": {
+                "class": RandomForestRegressor,
+                "params": {"n_estimators": 100, "max_depth": 10, "min_samples_split": 2, "n_jobs": -1},
+                "description": "Ensemble of decision trees using bootstrap sampling"
+            },
+            "Gradient Boosting": {
+                "class": GradientBoostingRegressor,
+                "params": {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 3, "subsample": 1.0},
+                "description": "Gradient boosting for regression"
+            },
+            "AdaBoost": {
+                "class": AdaBoostRegressor,
+                "params": {"n_estimators": 50, "learning_rate": 1.0, "loss": "linear"},
+                "description": "AdaBoost regression algorithm"
+            },
+            "Extra Trees": {
+                "class": ExtraTreesRegressor,
+                "params": {"n_estimators": 100, "max_depth": 10, "min_samples_split": 2, "n_jobs": -1},
+                "description": "Extremely randomized trees"
+            },
+            # Other models
+            "K-Nearest Neighbors": {
+                "class": KNeighborsRegressor,
+                "params": {"n_neighbors": 5, "weights": "uniform", "algorithm": "auto", "n_jobs": -1},
+                "description": "Regression based on k-nearest neighbors"
+            },
+            "Support Vector Regression": {
+                "class": SVR,
+                "params": {"kernel": "rbf", "C": 1.0, "epsilon": 0.1, "gamma": "scale"},
+                "description": "Support vector regression"
+            },
+            "MLP Regressor": {
+                "class": MLPRegressor,
+                "params": {"hidden_layer_sizes": (100,), "activation": "relu", "solver": "adam", "max_iter": 200},
+                "description": "Multi-layer Perceptron regressor"
+            },
         }
 
-        # Add advanced ensemble models if available
+        # Add XGBoost if available
         if XGBOOST_AVAILABLE:
-            models['XGBoost'] = (XGBRegressor, {
-                'n_estimators': 100,
-                'learning_rate': 0.1,
-                'max_depth': 3,
-                'min_child_weight': 1,
-                'subsample': 0.8,
-                'colsample_bytree': 0.8,
-                'objective': 'reg:squarederror',
-                'random_state': 42
-            })
+            models["XGBoost"] = {
+                "class": xgb.XGBRegressor,
+                "params": {
+                    "n_estimators": 100,
+                    "learning_rate": 0.1,
+                    "max_depth": 3,
+                    "subsample": 0.8,
+                    "colsample_bytree": 0.8,
+                    "objective": "reg:squarederror",
+                    "n_jobs": -1
+                },
+                "description": "XGBoost regression algorithm"
+            }
 
+        # Add LightGBM if available
         if LIGHTGBM_AVAILABLE:
-            models['LightGBM'] = (LGBMRegressor, {
-                'n_estimators': 100,
-                'learning_rate': 0.1,
-                'max_depth': -1,
-                'num_leaves': 31,
-                'min_child_samples': 20,
-                'subsample': 0.8,
-                'colsample_bytree': 0.8,
-                'objective': 'regression',
-                'random_state': 42
-            })
+            models["LightGBM"] = {
+                "class": lgb.LGBMRegressor,
+                "params": {
+                    "n_estimators": 100,
+                    "learning_rate": 0.1,
+                    "max_depth": -1,
+                    "num_leaves": 31,
+                    "subsample": 0.8,
+                    "colsample_bytree": 0.8,
+                    "objective": "regression",
+                    "n_jobs": -1
+                },
+                "description": "LightGBM regression algorithm"
+            }
 
+        # Add CatBoost if available
         if CATBOOST_AVAILABLE:
-            models['CatBoost'] = (CatBoostRegressor, {
-                'iterations': 100,
-                'learning_rate': 0.1,
-                'depth': 6,
-                'l2_leaf_reg': 3,
-                'loss_function': 'RMSE',
-                'verbose': False,
-                'random_state': 42
-            })
+            models["CatBoost"] = {
+                "class": cb.CatBoostRegressor,
+                "params": {
+                    "iterations": 100,
+                    "learning_rate": 0.1,
+                    "depth": 6,
+                    "l2_leaf_reg": 3,
+                    "loss_function": "RMSE",
+                    "verbose": False
+                },
+                "description": "CatBoost regression algorithm"
+            }
 
         return models
 
-    def load_data(self):
+    def load_data(self) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
         """
-        Load and prepare the training and testing data.
+        Load the training and test data
 
         Returns:
-            tuple: X_train, y_train, X_test, y_test
+            X_train, y_train, X_test, y_test
         """
-        section("Loading Transformed Data", logger)
+        section("Loading Data", logger)
+
         try:
-            logger.info(f"Loading training data from {self.train_transformed_path}")
-            train_df = pd.read_csv(self.train_transformed_path)
+            # Load train data
+            train_data = pd.read_csv(self.train_data_path)
+            logger.info(f"Loaded training data from {self.train_data_path}")
+            logger.info(f"Training data shape: {train_data.shape}")
 
-            logger.info(f"Loading testing data from {self.test_transformed_path}")
-            test_df = pd.read_csv(self.test_transformed_path)
+            # Load test data
+            test_data = pd.read_csv(self.test_data_path)
+            logger.info(f"Loaded test data from {self.test_data_path}")
+            logger.info(f"Test data shape: {test_data.shape}")
 
-            # Split into features and target
-            X_train = train_df.drop(self.target_column, axis=1)
-            y_train = train_df[self.target_column]
+            # Separate features and target
+            X_train = train_data.drop(columns=[self.target_column])
+            y_train = train_data[self.target_column]
+            X_test = test_data.drop(columns=[self.target_column])
+            y_test = test_data[self.target_column]
 
-            X_test = test_df.drop(self.target_column, axis=1)
-            y_test = test_df[self.target_column]
-
-            logger.info(f"Training data shape: {X_train.shape}")
-            logger.info(f"Testing data shape: {X_test.shape}")
+            logger.info(f"X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
+            logger.info(f"X_test shape: {X_test.shape}, y_test shape: {y_test.shape}")
 
             return X_train, y_train, X_test, y_test
 
@@ -233,226 +278,194 @@ class ModelBuilder:
             logger.error(f"Error loading data: {e}")
             raise
 
-    def display_available_models(self):
+    def select_model(self) -> Tuple[str, Dict[str, Any]]:
         """
-        Display the list of available regression models.
+        Display available models and let the user select one.
 
         Returns:
-            dict: Dictionary of available models with their indices.
-        """
-        section("Available Regression Models", logger)
-        model_dict = {}
-        for i, model_name in enumerate(self.models_dict.keys(), 1):
-            model_dict[i] = model_name
-            print(f"{i}. {model_name}")
-
-        return model_dict
-
-    def select_model(self):
-        """
-        Interactive model selection process.
-
-        Returns:
-            tuple: Selected model class and default parameters.
+            model_name: Name of the selected model
+            model_info: Dictionary with model class and parameters
         """
         section("Model Selection", logger)
-        model_dict = self.display_available_models()
 
-        while True:
+        logger.info("Available regression models:")
+        for i, (model_name, model_info) in enumerate(self.available_models.items(), 1):
+            logger.info(f"{i}. {model_name} - {model_info['description']}")
+
+        valid_selection = False
+        model_choice = None
+
+        while not valid_selection:
             try:
-                choice = int(input("\nSelect a model by entering its number: "))
-                if choice in model_dict:
-                    selected_model_name = model_dict[choice]
-                    selected_model_class, default_params = self.models_dict[selected_model_name]
-                    logger.info(f"Selected model: {selected_model_name}")
-                    return selected_model_name, selected_model_class, default_params
+                model_idx = int(input("\nSelect a model by entering its number: "))
+                if 1 <= model_idx <= len(self.available_models):
+                    model_choice = list(self.available_models.keys())[model_idx - 1]
+                    valid_selection = True
                 else:
-                    print(f"Invalid choice. Please select a number between 1 and {len(model_dict)}")
+                    print(f"Please enter a number between 1 and {len(self.available_models)}")
             except ValueError:
-                print("Please enter a valid number.")
+                print("Please enter a valid number")
 
-    def tune_hyperparameters(self, model_name, default_params):
+        model_info = self.available_models[model_choice]
+        logger.info(f"Selected model: {model_choice}")
+
+        # Ask if user wants to customize hyperparameters
+        customize = input("\nDo you want to customize the model hyperparameters? (y/n): ").lower().strip()
+
+        if customize == 'y':
+            logger.info("Default parameters:")
+            for param, value in model_info['params'].items():
+                print(f"  {param}: {value}")
+
+            print("\nEnter new parameters (press Enter to keep default, enter 'None' to set to None):")
+            new_params = {}
+
+            for param, default_value in model_info['params'].items():
+                new_value = input(f"  {param} (default: {default_value}): ").strip()
+
+                if new_value:
+                    if new_value.lower() == 'none':
+                        new_params[param] = None
+                    elif isinstance(default_value, bool):
+                        new_params[param] = new_value.lower() == 'true'
+                    elif isinstance(default_value, int):
+                        new_params[param] = int(new_value)
+                    elif isinstance(default_value, float):
+                        new_params[param] = float(new_value)
+                    elif isinstance(default_value, tuple):
+                        # Parse tuple of integers like (100, 50, 25)
+                        try:
+                            # Remove parentheses and split by commas
+                            values = new_value.strip('()').split(',')
+                            new_params[param] = tuple(int(v.strip()) for v in values)
+                        except ValueError:
+                            logger.warning(f"Could not parse {new_value} as tuple, keeping default: {default_value}")
+                            new_params[param] = default_value
+                    else:
+                        new_params[param] = new_value
+
+            # Update the parameters
+            model_info['params'].update(new_params)
+            logger.info("Updated parameters:")
+            for param, value in model_info['params'].items():
+                logger.info(f"  {param}: {value}")
+
+        return model_choice, model_info
+
+    def train_model(self, model_name: str, model_info: Dict[str, Any], X_train: pd.DataFrame, y_train: pd.Series) -> Any:
         """
-        Interactive hyperparameter tuning process.
+        Train the selected model
 
         Args:
-            model_name (str): Name of the selected model.
-            default_params (dict): Default parameters for the model.
+            model_name: Name of the model
+            model_info: Dictionary with model class and parameters
+            X_train: Training features
+            y_train: Training target
 
         Returns:
-            dict: Updated parameters for the model.
+            Trained model object
         """
-        section(f"Hyperparameter Tuning for {model_name}", logger)
-
-        print(f"\nDefault parameters for {model_name}:")
-        for param, value in default_params.items():
-            print(f"  - {param}: {value}")
-
-        tune = input("\nWould you like to tune any hyperparameters? (yes/no): ").lower().strip()
-
-        if tune in ['yes', 'y']:
-            params = default_params.copy()
-            print("\nEnter new values for parameters you want to tune (leave empty to keep default):")
-
-            for param, default_value in default_params.items():
-                while True:
-                    user_value = input(f"  {param} (default: {default_value}): ").strip()
-
-                    if not user_value:  # Keep default
-                        break
-
-                    try:
-                        # Try to interpret the input value based on the default value type
-                        if isinstance(default_value, int):
-                            params[param] = int(user_value)
-                        elif isinstance(default_value, float):
-                            params[param] = float(user_value)
-                        elif isinstance(default_value, str):
-                            params[param] = user_value
-                        elif isinstance(default_value, bool):
-                            params[param] = user_value.lower() in ['true', 'yes', 'y', '1']
-                        elif isinstance(default_value, tuple):
-                            # Parse tuple of integers, like hidden_layer_sizes
-                            params[param] = tuple(
-                                int(x.strip()) for x in user_value.strip('()').split(',') if x.strip())
-                        elif default_value is None:
-                            if user_value.lower() in ['none', 'null']:
-                                params[param] = None
-                            else:
-                                # Try to guess the type
-                                try:
-                                    params[param] = int(user_value)
-                                except ValueError:
-                                    try:
-                                        params[param] = float(user_value)
-                                    except ValueError:
-                                        params[param] = user_value
-                        else:
-                            # For complex types like kernels in Gaussian Process
-                            print(f"Complex parameter type. Using default value for {param}.")
-
-                        break
-                    except ValueError:
-                        print("Invalid value. Please try again.")
-
-            logger.info(f"Using custom parameters for {model_name}")
-            for param, value in params.items():
-                if params[param] != default_params[param]:
-                    logger.info(f"  - Changed {param}: {default_params[param]} -> {value}")
-
-            return params
-        else:
-            logger.info(f"Using default parameters for {model_name}")
-            return default_params
-
-    def train_model(self, model_class, params, X_train, y_train):
-        """
-        Train the selected model with specified parameters.
-
-        Args:
-            model_class: The scikit-learn model class to train.
-            params (dict): Parameters for the model.
-            X_train: Training features.
-            y_train: Training target.
-
-        Returns:
-            object: Trained model.
-        """
-        section("Model Training", logger)
+        section(f"Training {model_name}", logger)
 
         try:
-            logger.info(f"Initializing model with parameters: {params}")
-            model = model_class(**params)
+            # Instantiate model with parameters
+            model = model_info['class'](**model_info['params'])
 
-            logger.info("Training model...")
+            # Train the model
+            logger.info(f"Starting training for {model_name}...")
             model.fit(X_train, y_train)
+            logger.info(f"Model training completed successfully")
 
-            logger.info("Model training completed successfully")
             return model
 
         except Exception as e:
-            logger.error(f"Error during model training: {e}")
+            logger.error(f"Error training model: {e}")
             raise
 
-    def save_model(self, model, model_name, params):
+    def save_model(self, model: Any, model_name: str) -> str:
         """
-        Save the trained model and metadata to disk.
+        Save the trained model using cloudpickle
 
         Args:
-            model: Trained model object.
-            model_name (str): Name of the model.
-            params (dict): Parameters used for the model.
+            model: Trained model object
+            model_name: Name of the model
+
+        Returns:
+            Path to the saved model
         """
         section("Saving Model", logger)
 
-        try:
-            # Create model info dictionary
-            model_info = {
-                'model': model,
-                'model_name': model_name,
-                'parameters': params,
-                'dataset_name': self.dataset_name,
-                'target_column': self.target_column,
-                'created_at': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
+        # Create model directory if it doesn't exist
+        os.makedirs(self.model_dir, exist_ok=True)
 
+        try:
             # Save model with cloudpickle
             with open(self.model_path, 'wb') as f:
-                cloudpickle.dump(model_info, f)
+                cloudpickle.dump(model, f)
 
-            logger.info(f"Model saved successfully to {self.model_path}")
+            logger.info(f"Model saved to {self.model_path}")
 
-            # Save model metadata in yaml format for easy reading
-            metadata_path = self.model_dir / 'model_metadata.yaml'
-            metadata = {
-                'model_name': model_name,
-                'parameters': {k: str(v) for k, v in params.items()},  # Convert all values to strings for YAML
-                'dataset_name': self.dataset_name,
-                'target_column': self.target_column,
-                'created_at': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
+            # Update intel.yaml with model path
+            model_path_str = str(self.model_path)
+            self.intel['model_path'] = model_path_str
+            self.intel['model_name'] = model_name
+            self.intel['model_timestamp'] = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
 
-            with open(metadata_path, 'w') as f:
-                yaml.dump(metadata, f, default_flow_style=False)
+            with open(self.intel_path, 'w') as f:
+                yaml.dump(self.intel, f, default_flow_style=False)
 
-            logger.info(f"Model metadata saved to {metadata_path}")
+            logger.info(f"Updated intel.yaml with model path: {model_path_str}")
+
+            return model_path_str
 
         except Exception as e:
             logger.error(f"Error saving model: {e}")
             raise
 
-    def run(self):
+    def run(self) -> Dict[str, Any]:
         """
-        Run the model building pipeline.
+        Run the entire model building process
+
+        Returns:
+            Dictionary with model information
         """
-        section("Starting Model Building Pipeline", logger, char='*', length=80)
+        section("MODEL BUILDING PROCESS", logger, char='#', length=80)
 
         try:
             # Load data
             X_train, y_train, X_test, y_test = self.load_data()
 
             # Select model
-            model_name, model_class, default_params = self.select_model()
-
-            # Tune hyperparameters if requested
-            params = self.tune_hyperparameters(model_name, default_params)
+            model_name, model_info = self.select_model()
 
             # Train model
-            model = self.train_model(model_class, params, X_train, y_train)
+            model = self.train_model(model_name, model_info, X_train, y_train)
 
             # Save model
-            self.save_model(model, model_name, params)
+            model_path = self.save_model(model, model_name)
 
-            section("Model Building Pipeline Completed Successfully", logger, char='*', length=80)
+            result = {
+                'model_name': model_name,
+                'model_path': model_path,
+                'model_info': model_info
+            }
 
-            return model
+            section("MODEL BUILDING COMPLETED SUCCESSFULLY", logger, char='#', length=80)
+
+            return result
 
         except Exception as e:
-            logger.error(f"Model building pipeline failed: {e}")
-            section("Model Building Pipeline Failed", logger, level=logging.ERROR, char='*', length=80)
+            logger.error(f"Error in model building process: {e}")
+            section("MODEL BUILDING FAILED", logger, level=logging.ERROR, char='#', length=80)
             raise
 
 
 if __name__ == "__main__":
-    builder = ModelBuilder()
-    builder.run()
+    # Set up the model builder and run
+    try:
+        model_builder = ModelBuilder()
+        result = model_builder.run()
+        logger.info(f"Model built successfully: {result['model_name']}")
+    except Exception as e:
+        logger.error(f"Model building failed: {str(e)}")
+        sys.exit(1)

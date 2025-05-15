@@ -1,5 +1,8 @@
 dataset_name: gym
 feature_store_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\references\feature_store_gym\feature_store.yaml
+model_name: CatBoost
+model_path: models\model_gym\model.pkl
+model_timestamp: '2025-05-16 04:47:45'
 original_file_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\external\gym.csv
 plots_dir: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports/figures\plots_gym
 preprocessing_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\models\pipelines\preprocessing_gym\preprocessing.pkl
