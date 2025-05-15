@@ -3,9 +3,13 @@ feature_store_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\references\fe
 original_file_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\external\gym.csv
 plots_dir: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports/figures\plots_gym
 preprocessing_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\models\pipelines\preprocessing_gym\preprocessing.pkl
-processed_timestamp: '2025-05-15 17:17:54'
+processed_timestamp: '2025-05-16 02:23:13'
+processor_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\models\pipelines\preprocessing_gym\processor.pkl
 target_column: BMI
 test_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_gym\test.csv
 test_preprocessed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\data\interim\data_gym\test_preprocessed.csv
+test_transformed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\processed\data_gym\test_transformed.csv
 train_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_gym\train.csv
 train_preprocessed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\data\interim\data_gym\train_preprocessed.csv
+train_transformed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\processed\data_gym\train_transformed.csv
+transformation_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\models\pipelines\preprocessing_gym\transformation.pkl

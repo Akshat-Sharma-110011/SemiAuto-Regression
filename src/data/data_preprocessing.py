@@ -5,6 +5,9 @@ This module handles the preprocessing of data for the regression model, includin
 - Handling missing values
 - Handling duplicate values
 - Handling outliers
+- Handling skewed data
+- Scaling numerical features
+- Encoding categorical features
 
 The preprocessing steps are configured based on information in the feature_store.yaml file,
 and the preprocessing pipeline is saved for later use.
@@ -21,13 +24,22 @@ import cloudpickle
 from typing import Dict, List, Tuple, Optional, Union, Any
 from sklearn.base import BaseEstimator, TransformerMixin
 from pathlib import Path
+from sklearn.preprocessing import (
+    PowerTransformer,
+    StandardScaler,
+    RobustScaler,
+    MinMaxScaler,
+    OneHotEncoder,
+    LabelEncoder
+)
+import scipy.stats as stats
 
 # Set up the logger
 from src.logger import section, configure_logger
 
 # Configure logger
 configure_logger()
-logger = logging.getLogger("DataPreprocessing")
+logger = logging.getLogger("Data Preprocessing")
 
 
 class OutlierHandler(BaseEstimator, TransformerMixin):
@@ -258,6 +270,344 @@ class MissingValueHandler(BaseEstimator, TransformerMixin):
         return X_transformed
 
 
+class SkewedDataHandler(BaseEstimator, TransformerMixin):
+    """
+    Custom transformer for handling skewed data using power transformers.
+    """
+
+    def __init__(self, method: str = 'yeo-johnson', columns: List[str] = None):
+        """
+        Initialize the SkewedDataHandler.
+
+        Args:
+            method (str): Method to use for handling skewed data ('yeo-johnson' or 'box-cox')
+            columns (List[str]): List of columns to handle skewed data for
+        """
+        self.method = method
+        self.columns = columns
+        self.transformers = {}
+
+        # Validate method
+        if method not in ['yeo-johnson', 'box-cox']:
+            raise ValueError("Method must be either 'yeo-johnson' or 'box-cox'")
+
+        logger.info(f"Initialized SkewedDataHandler with method: {method}")
+
+    def fit(self, X, y=None):
+        """
+        Fit power transformers for skewed data handling.
+
+        Args:
+            X (pd.DataFrame): Input data
+            y: Ignored
+
+        Returns:
+            self
+        """
+        # Only process if columns are provided
+        if not self.columns:
+            logger.warning("No columns provided for skewed data handling")
+            return self
+
+        # Fit transformer for each column
+        for col in self.columns:
+            if col not in X.columns:
+                logger.warning(f"Column {col} not found in input data")
+                continue
+
+            # Create and fit transformer
+            transformer = PowerTransformer(method=self.method, standardize=True)
+
+            # Box-Cox requires positive values
+            if self.method == 'box-cox' and X[col].min() <= 0:
+                logger.warning(f"Column {col} has values <= 0, which is incompatible with Box-Cox transform.")
+                logger.warning(f"Shifting data to positive values for Box-Cox transformation")
+                shift_value = abs(X[col].min()) + 1.0  # Add 1 to ensure all values are positive
+                self.transformers[col] = {'transformer': transformer, 'shift': shift_value}
+                # Fit transformer on shifted data
+                transformer.fit(X[col].add(shift_value).values.reshape(-1, 1))
+            else:
+                self.transformers[col] = {'transformer': transformer, 'shift': 0.0}
+                # Fit transformer
+                transformer.fit(X[col].values.reshape(-1, 1))
+
+            logger.info(f"Fitted power transformer for {col}")
+
+        return self
+
+    def transform(self, X):
+        """
+        Transform skewed data using fitted power transformers.
+
+        Args:
+            X (pd.DataFrame): Input data
+
+        Returns:
+            pd.DataFrame: Transformed data with skewed data handled
+        """
+        X_transformed = X.copy()
+
+        if not self.columns or not self.transformers:
+            logger.warning("No columns or transformers available for skewed data handling")
+            return X_transformed
+
+        for col in self.columns:
+            if col not in X_transformed.columns or col not in self.transformers:
+                continue
+
+            # Get transformer and shift value
+            transformer = self.transformers[col]['transformer']
+            shift_value = self.transformers[col]['shift']
+
+            # Apply transformation
+            if shift_value > 0:
+                # Apply shift before transformation
+                transformed_values = transformer.transform(X_transformed[col].add(shift_value).values.reshape(-1, 1))
+            else:
+                transformed_values = transformer.transform(X_transformed[col].values.reshape(-1, 1))
+
+            # Replace original values with transformed values
+            X_transformed[col] = transformed_values.flatten()
+            logger.info(f"Transformed skewed data in {col}")
+
+        return X_transformed
+
+
+class NumericalScaler(BaseEstimator, TransformerMixin):
+    """
+    Custom transformer for scaling numerical features.
+    """
+
+    def __init__(self, method: str = 'standard', columns: List[str] = None):
+        """
+        Initialize the NumericalScaler.
+
+        Args:
+            method (str): Method to use for scaling ('standard', 'robust', 'minmax')
+            columns (List[str]): List of columns to scale
+        """
+        self.method = method
+        self.columns = columns
+        self.scalers = {}
+
+        # Validate method
+        if method not in ['standard', 'robust', 'minmax']:
+            raise ValueError("Method must be one of 'standard', 'robust', or 'minmax'")
+
+        logger.info(f"Initialized NumericalScaler with method: {method}")
+
+    def fit(self, X, y=None):
+        """
+        Fit scalers for numerical features.
+
+        Args:
+            X (pd.DataFrame): Input data
+            y: Ignored
+
+        Returns:
+            self
+        """
+        # Only process if columns are provided
+        if not self.columns:
+            logger.warning("No columns provided for scaling")
+            return self
+
+        # Initialize and fit scaler for each column
+        for col in self.columns:
+            if col not in X.columns:
+                logger.warning(f"Column {col} not found in input data")
+                continue
+
+            # Create and fit appropriate scaler
+            if self.method == 'standard':
+                scaler = StandardScaler()
+            elif self.method == 'robust':
+                scaler = RobustScaler()
+            elif self.method == 'minmax':
+                scaler = MinMaxScaler()
+
+            # Fit scaler
+            scaler.fit(X[col].values.reshape(-1, 1))
+            self.scalers[col] = scaler
+            logger.info(f"Fitted {self.method} scaler for {col}")
+
+        return self
+
+    def transform(self, X):
+        """
+        Scale numerical features using fitted scalers.
+
+        Args:
+            X (pd.DataFrame): Input data
+
+        Returns:
+            pd.DataFrame: Transformed data with scaled numerical features
+        """
+        X_transformed = X.copy()
+
+        if not self.columns or not self.scalers:
+            logger.warning("No columns or scalers available for scaling")
+            return X_transformed
+
+        for col in self.columns:
+            if col not in X_transformed.columns or col not in self.scalers:
+                continue
+
+            # Get scaler for this column
+            scaler = self.scalers[col]
+
+            # Apply scaling
+            scaled_values = scaler.transform(X_transformed[col].values.reshape(-1, 1))
+            X_transformed[col] = scaled_values.flatten()
+            logger.info(f"Scaled numerical features in {col}")
+
+        return X_transformed
+
+
+class CategoricalEncoder(BaseEstimator, TransformerMixin):
+    """
+    Custom transformer for encoding categorical features.
+    """
+
+    def __init__(self, method: str = 'onehot', columns: List[str] = None, drop_first: bool = True):
+        """
+        Initialize the CategoricalEncoder.
+
+        Args:
+            method (str): Method to use for encoding ('onehot', 'label', 'dummies')
+            columns (List[str]): List of columns to encode
+            drop_first (bool): Whether to drop the first category in one-hot encoding
+        """
+        self.method = method
+        self.columns = columns
+        self.drop_first = drop_first
+        self.encoders = {}
+        self.dummy_columns = {}
+
+        # Validate method
+        if method not in ['onehot', 'label', 'dummies']:
+            raise ValueError("Method must be one of 'onehot', 'label', or 'dummies'")
+
+        logger.info(f"Initialized CategoricalEncoder with method: {method}")
+
+    def fit(self, X, y=None):
+        """
+        Fit encoders for categorical features.
+
+        Args:
+            X (pd.DataFrame): Input data
+            y: Ignored
+
+        Returns:
+            self
+        """
+        # Only process if columns are provided
+        if not self.columns:
+            logger.warning("No columns provided for categorical encoding")
+            return self
+
+        # Initialize and fit encoder for each column
+        for col in self.columns:
+            if col not in X.columns:
+                logger.warning(f"Column {col} not found in input data")
+                continue
+
+            if self.method == 'onehot':
+                encoder = OneHotEncoder(sparse_output=False, drop='first' if self.drop_first else None)
+                encoder.fit(X[col].values.reshape(-1, 1))
+                self.encoders[col] = encoder
+                logger.info(f"Fitted OneHotEncoder for {col}")
+
+                # Store feature names for later
+                feature_names = encoder.get_feature_names_out([col])
+                self.dummy_columns[col] = feature_names.tolist()
+
+            elif self.method == 'label':
+                encoder = LabelEncoder()
+                encoder.fit(X[col])
+                self.encoders[col] = encoder
+                logger.info(f"Fitted LabelEncoder for {col}")
+
+            elif self.method == 'dummies':
+                # For 'dummies' method, we'll just store unique values
+                # actual transformation will be done in transform method
+                unique_values = X[col].unique()
+                self.encoders[col] = unique_values
+
+                # Create dummy column names (will be used during transform)
+                dummy_cols = [f"{col}_{val}" for val in unique_values]
+                if self.drop_first:
+                    dummy_cols = dummy_cols[1:]
+                self.dummy_columns[col] = dummy_cols
+
+                logger.info(f"Stored unique values for pd.get_dummies for {col}")
+
+        return self
+
+    def transform(self, X):
+        """
+        Encode categorical features using fitted encoders.
+
+        Args:
+            X (pd.DataFrame): Input data
+
+        Returns:
+            pd.DataFrame: Transformed data with encoded categorical features
+        """
+        X_transformed = X.copy()
+
+        if not self.columns or not self.encoders:
+            logger.warning("No columns or encoders available for categorical encoding")
+            return X_transformed
+
+        for col in self.columns:
+            if col not in X_transformed.columns or col not in self.encoders:
+                continue
+
+            if self.method == 'onehot':
+                # Apply one-hot encoding
+                encoder = self.encoders[col]
+                encoded_array = encoder.transform(X_transformed[col].values.reshape(-1, 1))
+
+                # Create DataFrame with encoded values
+                encoded_df = pd.DataFrame(
+                    encoded_array,
+                    columns=self.dummy_columns[col],
+                    index=X_transformed.index
+                )
+
+                # Drop original column and join encoded columns
+                X_transformed = X_transformed.drop(columns=[col])
+                X_transformed = pd.concat([X_transformed, encoded_df], axis=1)
+                logger.info(f"Applied OneHotEncoder to {col}, created {len(self.dummy_columns[col])} new columns")
+
+            elif self.method == 'label':
+                # Apply label encoding
+                encoder = self.encoders[col]
+                X_transformed[col] = encoder.transform(X_transformed[col])
+                logger.info(f"Applied LabelEncoder to {col}")
+
+            elif self.method == 'dummies':
+                # Use pandas.get_dummies
+                dummies = pd.get_dummies(X_transformed[col], prefix=col, drop_first=self.drop_first, dtype=int)
+
+                # Drop original column and join dummy columns
+                X_transformed = X_transformed.drop(columns=[col])
+                X_transformed = pd.concat([X_transformed, dummies], axis=1)
+
+                # Check for any missing dummy columns that were in the training data
+                expected_dummy_cols = set(self.dummy_columns[col])
+                actual_dummy_cols = set([col for col in dummies.columns])
+
+                # Add missing dummy columns (with all zeros)
+                for missing_col in expected_dummy_cols - actual_dummy_cols:
+                    X_transformed[missing_col] = 0
+
+                logger.info(f"Applied pd.get_dummies to {col}, created {dummies.shape[1]} new columns")
+
+        return X_transformed
+
+
 class PreprocessingPipeline:
     """
     Main preprocessing pipeline that orchestrates the preprocessing steps.
@@ -276,6 +626,9 @@ class PreprocessingPipeline:
         self.feature_store = config.get('feature_store', {})
         self.missing_handler = None
         self.outlier_handler = None
+        self.skewed_handler = None
+        self.numerical_scaler = None
+        self.categorical_encoder = None
 
         logger.info(f"Initialized PreprocessingPipeline for dataset: {self.dataset_name}")
 
@@ -300,6 +653,40 @@ class PreprocessingPipeline:
         """
         self.outlier_handler = OutlierHandler(method=method, columns=columns)
         logger.info(f"Set up outlier handler with method: {method}")
+
+    def handle_skewed_data(self, method: str = 'yeo-johnson', columns: List[str] = None):
+        """
+        Set up the skewed data handler.
+
+        Args:
+            method (str): Method to use for handling skewed data
+            columns (List[str]): List of columns to handle skewed data for
+        """
+        self.skewed_handler = SkewedDataHandler(method=method, columns=columns)
+        logger.info(f"Set up skewed data handler with method: {method}")
+
+    def scale_numerical_features(self, method: str = 'standard', columns: List[str] = None):
+        """
+        Set up the numerical scaler.
+
+        Args:
+            method (str): Method to use for scaling numerical features
+            columns (List[str]): List of columns to scale
+        """
+        self.numerical_scaler = NumericalScaler(method=method, columns=columns)
+        logger.info(f"Set up numerical scaler with method: {method}")
+
+    def encode_categorical_features(self, method: str = 'onehot', columns: List[str] = None, drop_first: bool = True):
+        """
+        Set up the categorical encoder.
+
+        Args:
+            method (str): Method to use for encoding categorical features
+            columns (List[str]): List of columns to encode
+            drop_first (bool): Whether to drop the first category in one-hot encoding
+        """
+        self.categorical_encoder = CategoricalEncoder(method=method, columns=columns, drop_first=drop_first)
+        logger.info(f"Set up categorical encoder with method: {method}")
 
     def remove_duplicates(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -340,6 +727,18 @@ class PreprocessingPipeline:
         if self.outlier_handler:
             self.outlier_handler.fit(X)
 
+        # Fit the skewed data handler if defined
+        if self.skewed_handler:
+            self.skewed_handler.fit(X)
+
+        # Fit the numerical scaler if defined
+        if self.numerical_scaler:
+            self.numerical_scaler.fit(X)
+
+        # Fit the categorical encoder if defined
+        if self.categorical_encoder:
+            self.categorical_encoder.fit(X)
+
     def transform(self, X: pd.DataFrame, handle_duplicates: bool = True) -> pd.DataFrame:
         """
         Transform the data using the fitted preprocessing pipeline.
@@ -365,6 +764,24 @@ class PreprocessingPipeline:
         # Transform with outlier handler if defined
         if self.outlier_handler:
             transformed_data = self.outlier_handler.transform(transformed_data)
+
+        # Transform with skewed data handler if defined
+        if self.skewed_handler:
+            transformed_data = self.skewed_handler.transform(transformed_data)
+
+        # Transform with numerical scaler if defined
+        if self.numerical_scaler:
+            transformed_data = self.numerical_scaler.transform(transformed_data)
+
+        # Transform with categorical encoder if defined
+        if self.categorical_encoder:
+            transformed_data = self.categorical_encoder.transform(transformed_data)
+
+        if self.target_column and self.target_column in transformed_data.columns:
+            # Extract and reinsert the target column to the end
+            target_data = transformed_data.pop(self.target_column)
+            transformed_data[self.target_column] = target_data
+            logger.info(f"Target column '{self.target_column}' moved to the last position")
 
         return transformed_data
 
@@ -466,6 +883,125 @@ def check_for_duplicates(df: pd.DataFrame) -> bool:
         return False
 
 
+def check_for_skewness(df: pd.DataFrame, columns: List[str], threshold: float = 0.5) -> Dict[str, float]:
+    """
+    Check for skewness in the specified columns.
+
+    Args:
+        df (pd.DataFrame): Input dataframe
+        columns (List[str]): Columns to check for skewness
+        threshold (float): Skewness threshold (abs value) to consider a column skewed
+
+    Returns:
+        Dict[str, float]: Dictionary with column names as keys and skewness values as values
+    """
+    skewed_columns = {}
+
+    for col in columns:
+        if col not in df.columns:
+            continue
+
+        skewness = df[col].skew()
+        if abs(skewness) > threshold:
+            skewed_columns[col] = skewness
+            logger.info(f"Column {col} is skewed with skewness value: {skewness:.4f}")
+
+    return skewed_columns
+
+
+def get_numerical_columns(df: pd.DataFrame, exclude: List[str] = None) -> List[str]:
+    """
+    Get list of numerical columns in the dataframe.
+
+    Args:
+        df (pd.DataFrame): Input dataframe
+        exclude (List[str]): Columns to exclude
+
+    Returns:
+        List[str]: List of numerical columns
+    """
+    if exclude is None:
+        exclude = []
+
+    # Get columns with numeric dtype
+    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+
+    # Exclude specified columns
+    numeric_cols = [col for col in numeric_cols if col not in exclude]
+
+    return numeric_cols
+
+
+def get_categorical_columns(df: pd.DataFrame, exclude: List[str] = None) -> List[str]:
+    """
+    Get list of categorical columns in the dataframe.
+
+    Args:
+        df (pd.DataFrame): Input dataframe
+        exclude (List[str]): Columns to exclude
+
+    Returns:
+        List[str]: List of categorical columns
+    """
+    if exclude is None:
+        exclude = []
+
+    # Get columns with object or category dtype
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+
+    # Exclude specified columns
+    cat_cols = [col for col in cat_cols if col not in exclude]
+
+    return cat_cols
+
+
+def recommend_skewness_transformer(df: pd.DataFrame, column: str) -> str:
+    """
+    Recommend the best transformer for a skewed column.
+
+    Args:
+        df (pd.DataFrame): Input dataframe
+        column (str): Column name to check
+
+    Returns:
+        str: Recommended transformer ('yeo-johnson' or 'box-cox')
+    """
+    # Check if column contains negative or zero values
+    if df[column].min() <= 0:
+        logger.info(f"Column {column} contains negative or zero values, recommending Yeo-Johnson transformation")
+        return 'yeo-johnson'
+
+    # Check the skewness after both transformations
+    # Create a sample to test transformations (for speed)
+    sample = df[column].sample(min(1000, len(df))).copy()
+
+    # Test Yeo-Johnson
+    try:
+        yj_transformer = PowerTransformer(method='yeo-johnson')
+        yj_transformed = yj_transformer.fit_transform(sample.values.reshape(-1, 1)).flatten()
+        yj_skewness = stats.skew(yj_transformed)
+    except Exception as e:
+        logger.warning(f"Error testing Yeo-Johnson transformation: {str(e)}")
+        yj_skewness = float('inf')
+
+    # Test Box-Cox
+    try:
+        bc_transformer = PowerTransformer(method='box-cox')
+        bc_transformed = bc_transformer.fit_transform(sample.values.reshape(-1, 1)).flatten()
+        bc_skewness = stats.skew(bc_transformed)
+    except Exception as e:
+        logger.warning(f"Error testing Box-Cox transformation: {str(e)}")
+        bc_skewness = float('inf')
+
+    # Compare and recommend
+    if abs(bc_skewness) <= abs(yj_skewness):
+        logger.info(f"Box-Cox transformation recommended for {column} (skewness: {bc_skewness:.4f} vs {yj_skewness:.4f})")
+        return 'box-cox'
+    else:
+        logger.info(f"Yeo-Johnson transformation recommended for {column} (skewness: {yj_skewness:.4f} vs {bc_skewness:.4f})")
+        return 'yeo-johnson'
+
+
 def main():
     """
     Main function to run the data preprocessing pipeline.
@@ -490,9 +1026,11 @@ def main():
         feature_store = load_yaml(feature_store_path)
         logger.info(f"Loaded feature store from {feature_store_path}")
 
-        # Check for null columns in feature store
-        null_columns = feature_store.get('contains_null', [])
-        outlier_columns = feature_store.get('contains_outliers', [])
+        # Check for special columns in feature store and exclude target column
+        null_columns = [col for col in feature_store.get('contains_null', []) if col != target_column]
+        outlier_columns = [col for col in feature_store.get('contains_outliers', []) if col != target_column]
+        skewed_columns = [col for col in feature_store.get('skewed_cols', []) if col != target_column]
+        categorical_columns = [col for col in feature_store.get('categorical_cols', []) if col != target_column]
 
         # Load training and test data
         train_df = pd.read_csv(train_path)
@@ -509,6 +1047,18 @@ def main():
 
         # Check for duplicates in training data
         has_duplicates = check_for_duplicates(train_df)
+
+        # If categorical columns not specified in feature store, detect them automatically
+        if not categorical_columns:
+            categorical_columns = get_categorical_columns(train_df, exclude=[target_column])
+            logger.info(f"Auto-detected categorical columns: {categorical_columns}")
+
+        # If skewed columns not specified in feature store, detect them automatically
+        if not skewed_columns:
+            numerical_columns = get_numerical_columns(train_df, exclude=[target_column])
+            skewness_dict = check_for_skewness(train_df, numerical_columns)
+            skewed_columns = list(skewness_dict.keys())
+            logger.info(f"Auto-detected skewed columns: {skewed_columns}")
 
         # Set up paths for output files
         interim_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'interim',
@@ -586,6 +1136,96 @@ def main():
                 logger.warning("Invalid choice, using default (IQR)")
                 pipeline.handle_outliers(method='IQR', columns=outlier_columns)
 
+        # Handle skewed data if any
+        if skewed_columns:
+            logger.info(f"Found columns with skewed distributions: {skewed_columns}")
+            print(f"Found columns with skewed distributions: {skewed_columns}")
+
+            # Show recommended transformer for each skewed column
+            print("\nRecommended transformers for each skewed column:")
+            recommended_transformers = {}
+            for col in skewed_columns:
+                recommended = recommend_skewness_transformer(train_df, col)
+                recommended_transformers[col] = recommended
+                print(f"  - {col}: {recommended}")
+
+            print("\nHow would you like to handle skewed data?")
+            print("1. Use Yeo-Johnson transformation (works with negative values)")
+            print("2. Use Box-Cox transformation (requires positive values)")
+            print("3. Use recommended transformer for each column")
+
+            choice = input("Enter your choice (1-3): ")
+
+            if choice == '1':
+                pipeline.handle_skewed_data(method='yeo-johnson', columns=skewed_columns)
+            elif choice == '2':
+                pipeline.handle_skewed_data(method='box-cox', columns=skewed_columns)
+            elif choice == '3':
+                # We'll use the recommended transformer
+                # This would require modifying our approach slightly
+                # For now, we'll use the most recommended transformer
+                counts = {'yeo-johnson': 0, 'box-cox': 0}
+                for col, transformer in recommended_transformers.items():
+                    counts[transformer] += 1
+
+                # Use the most recommended transformer
+                if counts['box-cox'] > counts['yeo-johnson']:
+                    pipeline.handle_skewed_data(method='box-cox', columns=skewed_columns)
+                else:
+                    pipeline.handle_skewed_data(method='yeo-johnson', columns=skewed_columns)
+            else:
+                logger.warning("Invalid choice, using default (Yeo-Johnson)")
+                pipeline.handle_skewed_data(method='yeo-johnson', columns=skewed_columns)
+
+        # Scale numerical features
+        numerical_columns = get_numerical_columns(train_df, exclude=[target_column])
+        if numerical_columns:
+            logger.info(f"Found numerical columns: {numerical_columns}")
+            print(f"\nFound numerical columns: {numerical_columns}")
+            print("Would you like to scale these numerical features?")
+            print("1. Yes, use StandardScaler (mean=0, std=1)")
+            print("2. Yes, use RobustScaler (median=0, IQR=1, robust to outliers)")
+            print("3. Yes, use MinMaxScaler (scale to range [0,1])")
+            print("4. No, do not scale numerical features")
+
+            choice = input("Enter your choice (1-4): ")
+
+            if choice == '1':
+                pipeline.scale_numerical_features(method='standard', columns=numerical_columns)
+            elif choice == '2':
+                pipeline.scale_numerical_features(method='robust', columns=numerical_columns)
+            elif choice == '3':
+                pipeline.scale_numerical_features(method='minmax', columns=numerical_columns)
+            elif choice == '4':
+                logger.info("Skipping numerical feature scaling")
+            else:
+                logger.warning("Invalid choice, skipping numerical feature scaling")
+
+        # Encode categorical features
+        if categorical_columns:
+            logger.info(f"Found categorical columns: {categorical_columns}")
+            print(f"\nFound categorical columns: {categorical_columns}")
+            print("How would you like to encode these categorical features?")
+            print("1. Use OneHotEncoder (sklearn)")
+            print("2. Use pd.get_dummies (pandas)")
+            print("3. Use LabelEncoder (convert to integers)")
+
+            choice = input("Enter your choice (1-3): ")
+
+            if choice == '1':
+                # Ask about dropping first category
+                drop_first = input("Drop first category to avoid multicollinearity? (y/n): ").lower() == 'y'
+                pipeline.encode_categorical_features(method='onehot', columns=categorical_columns, drop_first=drop_first)
+            elif choice == '2':
+                # Ask about dropping first category
+                drop_first = input("Drop first category to avoid multicollinearity? (y/n): ").lower() == 'y'
+                pipeline.encode_categorical_features(method='dummies', columns=categorical_columns, drop_first=drop_first)
+            elif choice == '3':
+                pipeline.encode_categorical_features(method='label', columns=categorical_columns)
+            else:
+                logger.warning("Invalid choice, using default (OneHotEncoder)")
+                pipeline.encode_categorical_features(method='onehot', columns=categorical_columns)
+
         section("FITTING PIPELINE", logger)
         # Fit the pipeline on training data
         pipeline.fit(train_df)
@@ -593,16 +1233,22 @@ def main():
         section("TRANSFORMING DATA", logger)
         # Transform training data
         train_preprocessed = pipeline.transform(train_df, handle_duplicates=handle_duplicates)
+        # Ensure target column is the last column
+        if target_column in train_preprocessed.columns:
+            cols = [col for col in train_preprocessed.columns if col != target_column] + [target_column]
+            train_preprocessed = train_preprocessed[cols]
         logger.info(f"Transformed training data: {train_preprocessed.shape}")
 
         # Transform test data (without handling duplicates in test data)
         test_preprocessed = pipeline.transform(test_df, handle_duplicates=False)
+        # Ensure target column is the last column
+        if target_column in test_preprocessed.columns:
+            cols = [col for col in test_preprocessed.columns if col != target_column] + [target_column]
+            test_preprocessed = test_preprocessed[cols]
         logger.info(f"Transformed test data: {test_preprocessed.shape}")
 
-        # Save preprocessed data
         train_preprocessed.to_csv(train_preprocessed_path, index=False)
         test_preprocessed.to_csv(test_preprocessed_path, index=False)
-        logger.info(f"Saved preprocessed data to {train_preprocessed_path} and {test_preprocessed_path}")
 
         # Save the pipeline
         pipeline.save(pipeline_path)
