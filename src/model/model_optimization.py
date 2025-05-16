@@ -48,6 +48,10 @@ import catboost as cb
 # Import custom logger
 from src.logger import section, configure_logger
 
+with open('intel.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+    dataset_name = config['dataset_name']
+
 # Configure logger
 configure_logger()
 logger = logging.getLogger("Model Optimization")
@@ -82,7 +86,7 @@ class ModelOptimizer:
         self.optimized_model_path = os.path.join(self.optimized_model_dir, "optimized_model.pkl")
 
         self.best_params_dir = os.path.join(ROOT_DIR, "reports", "metrics", f"best_params_{self.dataset_name}")
-        self.best_params_path = os.path.join(self.best_params_dir, "params.yaml")
+        self.best_params_path = os.path.join(self.best_params_dir, "params.json")
 
         # Create directories if they don't exist
         os.makedirs(self.optimized_model_dir, exist_ok=True)

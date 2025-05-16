@@ -24,3 +24,4 @@ PyPDF2
 reportlab
 PyYAML
 fpdf
+dvc

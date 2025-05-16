@@ -1,3 +1,4 @@
+import json
 import os
 import yaml
 import pandas as pd
@@ -6,6 +7,10 @@ from fpdf import FPDF
 from pathlib import Path
 import datetime
 import matplotlib
+
+with open('intel.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+    dataset_name = config['dataset_name']
 
 matplotlib.use('Agg')  # Use non-interactive backend
 
@@ -579,6 +584,7 @@ class ProjectFlowReport:
         if 'optimized_model_path' not in self.intel:
             self.add_section_header("6. Model Optimization",
                                     "This step was skipped in the current project.")
+            self.add_page()
             return
 
         self.add_section_header("6. Model Optimization",
@@ -588,26 +594,38 @@ class ProjectFlowReport:
         if 'best_params_path' in self.intel:
             params_path = self.intel['best_params_path']
             if os.path.exists(params_path):
-                with open(params_path, 'r') as file:
-                    params = yaml.safe_load(file)
+                try:
+                    with open(params_path, 'r') as file:
+                        # Check if file is not empty
+                        if os.path.getsize(params_path) > 0:
+                            params = json.load(file)
 
-                self.add_subsection_header("Optimized Hyperparameters")
+                            self.add_subsection_header("Optimized Hyperparameters")
 
-                # Table header
-                self.pdf.set_font('Helvetica', 'B', 10)
-                self.pdf.set_fill_color(*self.highlight_color)
-                self.pdf.set_text_color(*self.bg_color)
-                self.pdf.cell(90, 8, "Parameter", 1, 0, 'C', True)
-                self.pdf.cell(90, 8, "Value", 1, 1, 'C', True)
-                self.pdf.set_text_color(*self.primary_color)  # Reset text color
+                            # Table header
+                            self.pdf.set_font('Helvetica', 'B', 10)
+                            self.pdf.set_fill_color(*self.highlight_color)
+                            self.pdf.set_text_color(*self.bg_color)
+                            self.pdf.cell(90, 8, "Parameter", 1, 0, 'C', True)
+                            self.pdf.cell(90, 8, "Value", 1, 1, 'C', True)
+                            self.pdf.set_text_color(*self.primary_color)  # Reset text color
 
-                # Table rows
-                self.pdf.set_font('Helvetica', '', 10)
-                for param, value in params.items():
-                    self.pdf.cell(90, 8, param, 1, 0, 'L')
-                    self.pdf.cell(90, 8, str(value), 1, 1, 'C')
+                            # Table rows
+                            self.pdf.set_font('Helvetica', '', 10)
+                            for param, value in params.items():
+                                self.pdf.cell(90, 8, param, 1, 0, 'L')
+                                self.pdf.cell(90, 8, str(value), 1, 1, 'C')
 
-                self.pdf.ln(5)
+                            self.pdf.ln(5)
+                        else:
+                            self.pdf.set_font('Helvetica', '', 10)
+                            self.pdf.cell(0, 6, "Hyperparameters file is empty.", 0, 1, 'L')
+                except json.JSONDecodeError:
+                    self.pdf.set_font('Helvetica', '', 10)
+                    self.pdf.cell(0, 6, "Error: Could not decode hyperparameters file.", 0, 1, 'L')
+                except Exception as e:
+                    self.pdf.set_font('Helvetica', '', 10)
+                    self.pdf.cell(0, 6, f"Error loading hyperparameters: {str(e)}", 0, 1, 'L')
 
         # Optimization timestamp
         if 'optimization_timestamp' in self.intel:

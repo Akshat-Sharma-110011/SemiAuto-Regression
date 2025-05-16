@@ -84,7 +84,7 @@ correlated_cols:
   - column: Weight (kg)
     correlation: 0.8531576898507083
 target_col: BMI
-timestamp: '2025-05-16 11:47:25'
+timestamp: '2025-05-17 04:08:41'
 train_size: 0.8
 test_size: 0.2
 dataset_name: gym

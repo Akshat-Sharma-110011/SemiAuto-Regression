@@ -37,6 +37,10 @@ import scipy.stats as stats
 # Set up the logger
 from src.logger import section, configure_logger
 
+with open('intel.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+    dataset_name = config['dataset_name']
+
 # Configure logger
 configure_logger()
 logger = logging.getLogger("Data Preprocessing")

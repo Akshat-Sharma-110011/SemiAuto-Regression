@@ -57,6 +57,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
 from src.logger import section, configure_logger  # Configure logger
 
+with open('intel.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+    dataset_name = config['dataset_name']
+
 # Configure logger
 configure_logger()
 logger = logging.getLogger("Model Building")

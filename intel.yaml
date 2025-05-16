@@ -1,16 +1,17 @@
-best_params_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports\metrics\best_params_gym\params.yaml
+best_params_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports\metrics\best_params_gym\params.json
 dataset_name: gym
-evaluation_timestamp: '2025-05-16 11:59:07'
+evaluation_timestamp: '2025-05-17 04:33:27'
 feature_engineering_config:
-  timestamp: '2025-05-16 11:48:30'
-  use_feature_tools: false
-  use_shap_selection: false
+  n_features_selected: 20
+  timestamp: '2025-05-17 04:09:33'
+  use_feature_tools: true
+  use_shap_selection: true
 feature_store_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\references\feature_store_gym\feature_store.yaml
 model_name: CatBoost
 model_path: model\model_gym\model.pkl
-model_timestamp: '2025-05-16 11:48:56'
-optimization_timestamp: '2025-05-16 11:57:50'
-optimized_evaluation_timestamp: '2025-05-16 11:59:07'
+model_timestamp: '2025-05-17 04:09:59'
+optimization_timestamp: '2025-05-17 04:33:25'
+optimized_evaluation_timestamp: '2025-05-17 04:33:27'
 optimized_model_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\model\model_gym\optimized_model.pkl
 optimized_performance_metrics_path: reports\metrics\performance_gym\optimized_performance.yaml
 original_file_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\external\gym.csv
@@ -50,13 +51,13 @@ preprocessing_config:
     - Fat_Percentage
     method: box-cox
 preprocessing_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\model\pipelines\preprocessing_gym\preprocessing.pkl
-processed_timestamp: '2025-05-16 11:48:07'
-processor_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\model\pipelines\preprocessing_gym\processor.pkl
+processed_timestamp: '2025-05-17 04:08:55'
+processor_pipeline_path: model\pipelines\preprocessing_gym\processor.pkl
 target_column: BMI
 test_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_gym\test.csv
 test_preprocessed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\data\interim\data_gym\test_preprocessed.csv
-test_transformed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\processed\data_gym\test_transformed.csv
+test_transformed_path: data\processed\data_gym\test_transformed.csv
 train_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_gym\train.csv
 train_preprocessed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\data\interim\data_gym\train_preprocessed.csv
-train_transformed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\processed\data_gym\train_transformed.csv
-transformation_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\model\pipelines\preprocessing_gym\transformation.pkl
+train_transformed_path: data\processed\data_gym\train_transformed.csv
+transformation_pipeline_path: model\pipelines\preprocessing_gym\transformation.pkl

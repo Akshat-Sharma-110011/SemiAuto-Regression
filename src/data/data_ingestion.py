@@ -30,7 +30,6 @@ TEST_SIZE = 0.2
 RANDOM_STATE = 42
 OUTLIER_THRESHOLD = 1.5  # IQR multiplier for outlier detection
 
-
 class DataIngestion:
     """
     Class for handling data ingestion from CSV files, performing initial analysis,
