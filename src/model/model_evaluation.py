@@ -225,7 +225,7 @@ def check_optimized_model_exists(dataset_name: str) -> Tuple[bool, str]:
     Returns:
         Tuple of (exists, path)
     """
-    optimized_model_path = os.path.join("models", f"model_{dataset_name}", "optimized_model.pkl")
+    optimized_model_path = os.path.join("model", f"model_{dataset_name}", "optimized_model.pkl")
     exists = os.path.isfile(optimized_model_path)
 
     if exists:

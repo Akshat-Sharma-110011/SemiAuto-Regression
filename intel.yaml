@@ -1,20 +1,57 @@
 best_params_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports\metrics\best_params_gym\params.yaml
 dataset_name: gym
-evaluation_timestamp: '2025-05-16 06:35:44'
+evaluation_timestamp: '2025-05-16 11:59:07'
+feature_engineering_config:
+  timestamp: '2025-05-16 11:48:30'
+  use_feature_tools: false
+  use_shap_selection: false
 feature_store_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\references\feature_store_gym\feature_store.yaml
 model_name: CatBoost
-model_path: models\model_gym\model.pkl
-model_timestamp: '2025-05-16 05:09:51'
-optimization_timestamp: '2025-05-16 06:23:06'
-optimized_evaluation_timestamp: '2025-05-16 06:35:44'
-optimized_model_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\models\model_gym\optimized_model.pkl
+model_path: model\model_gym\model.pkl
+model_timestamp: '2025-05-16 11:48:56'
+optimization_timestamp: '2025-05-16 11:57:50'
+optimized_evaluation_timestamp: '2025-05-16 11:59:07'
+optimized_model_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\model\model_gym\optimized_model.pkl
 optimized_performance_metrics_path: reports\metrics\performance_gym\optimized_performance.yaml
 original_file_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\external\gym.csv
 performance_metrics_path: reports\metrics\performance_gym\performance.yaml
 plots_dir: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports/figures\plots_gym
-preprocessing_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\models\pipelines\preprocessing_gym\preprocessing.pkl
-processed_timestamp: '2025-05-16 02:23:13'
-processor_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\models\pipelines\preprocessing_gym\processor.pkl
+preprocessing_config:
+  categorical_encoding:
+    columns:
+    - Gender
+    - Workout_Type
+    drop_first: true
+    method: onehot
+  handle_duplicates: true
+  numerical_scaling:
+    columns:
+    - Age
+    - Weight (kg)
+    - Height (m)
+    - Max_BPM
+    - Avg_BPM
+    - Resting_BPM
+    - Session_Duration (hours)
+    - Calories_Burned
+    - Fat_Percentage
+    - Water_Intake (liters)
+    - Workout_Frequency (days/week)
+    - Experience_Level
+    method: standard
+  outliers:
+    columns:
+    - Weight (kg)
+    - Calories_Burned
+    method: IQR
+  skewed_data:
+    columns:
+    - Weight (kg)
+    - Fat_Percentage
+    method: box-cox
+preprocessing_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\model\pipelines\preprocessing_gym\preprocessing.pkl
+processed_timestamp: '2025-05-16 11:48:07'
+processor_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\model\pipelines\preprocessing_gym\processor.pkl
 target_column: BMI
 test_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_gym\test.csv
 test_preprocessed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\data\interim\data_gym\test_preprocessed.csv
@@ -22,4 +59,4 @@ test_transformed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\proce
 train_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_gym\train.csv
 train_preprocessed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\data\interim\data_gym\train_preprocessed.csv
 train_transformed_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\processed\data_gym\train_transformed.csv
-transformation_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\models\pipelines\preprocessing_gym\transformation.pkl
+transformation_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\model\pipelines\preprocessing_gym\transformation.pkl

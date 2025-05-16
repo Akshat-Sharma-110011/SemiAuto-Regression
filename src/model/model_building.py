@@ -85,7 +85,7 @@ class ModelBuilder:
         self.test_data_path = self.intel.get('test_transformed_path')
 
         # Setup model directory
-        self.model_dir = Path(f"models/model_{self.dataset_name}")
+        self.model_dir = Path(f"model/model_{self.dataset_name}")
         self.model_path = self.model_dir / "model.pkl"
 
         # Available models dictionary with their default parameters

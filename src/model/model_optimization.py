@@ -78,7 +78,7 @@ class ModelOptimizer:
         self.test_path = self.intel_config.get("test_transformed_path")
 
         # Set up paths for saving outputs
-        self.optimized_model_dir = os.path.join(ROOT_DIR, "models", f"model_{self.dataset_name}")
+        self.optimized_model_dir = os.path.join(ROOT_DIR, "model", f"model_{self.dataset_name}")
         self.optimized_model_path = os.path.join(self.optimized_model_dir, "optimized_model.pkl")
 
         self.best_params_dir = os.path.join(ROOT_DIR, "reports", "metrics", f"best_params_{self.dataset_name}")
@@ -678,9 +678,15 @@ class ModelOptimizer:
 
 def run_optimization():
     """Main function to run the model optimization process."""
-    section("Model Optimization", logger)
-
     try:
+        # Ask user if they want to perform optimization
+        optimize_choice = input("\nDo you want to perform model optimization? (yes/no): ").strip().lower()
+        if optimize_choice not in ['yes', 'y']:
+            logger.info("Model optimization skipped as per user choice.")
+            return
+
+        section("Model Optimization", logger)
+
         # Initialize optimizer
         optimizer = ModelOptimizer()
 

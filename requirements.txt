@@ -19,3 +19,8 @@ xgboost
 lightgbm
 catboost
 optuna
+shap
+PyPDF2
+reportlab
+PyYAML
+fpdf

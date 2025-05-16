@@ -1162,8 +1162,6 @@ def main():
                 pipeline.handle_skewed_data(method='box-cox', columns=skewed_columns)
             elif choice == '3':
                 # We'll use the recommended transformer
-                # This would require modifying our approach slightly
-                # For now, we'll use the most recommended transformer
                 counts = {'yeo-johnson': 0, 'box-cox': 0}
                 for col, transformer in recommended_transformers.items():
                     counts[transformer] += 1
@@ -1226,6 +1224,48 @@ def main():
                 logger.warning("Invalid choice, using default (OneHotEncoder)")
                 pipeline.encode_categorical_features(method='onehot', columns=categorical_columns)
 
+        # Collect preprocessing configuration from the pipeline
+        preprocessing_config = {}
+
+        # Missing values handling
+        if pipeline.missing_handler:
+            preprocessing_config['missing_values'] = {
+                'method': pipeline.missing_handler.method,
+                'columns': pipeline.missing_handler.columns
+            }
+
+        # Outlier handling
+        if pipeline.outlier_handler:
+            preprocessing_config['outliers'] = {
+                'method': pipeline.outlier_handler.method,
+                'columns': pipeline.outlier_handler.columns
+            }
+
+        # Skewed data handling
+        if pipeline.skewed_handler:
+            preprocessing_config['skewed_data'] = {
+                'method': pipeline.skewed_handler.method,
+                'columns': pipeline.skewed_handler.columns
+            }
+
+        # Numerical scaling
+        if pipeline.numerical_scaler:
+            preprocessing_config['numerical_scaling'] = {
+                'method': pipeline.numerical_scaler.method,
+                'columns': pipeline.numerical_scaler.columns
+            }
+
+        # Categorical encoding
+        if pipeline.categorical_encoder:
+            preprocessing_config['categorical_encoding'] = {
+                'method': pipeline.categorical_encoder.method,
+                'columns': pipeline.categorical_encoder.columns,
+                'drop_first': pipeline.categorical_encoder.drop_first
+            }
+
+        # Duplicates handling
+        preprocessing_config['handle_duplicates'] = handle_duplicates
+
         section("FITTING PIPELINE", logger)
         # Fit the pipeline on training data
         pipeline.fit(train_df)
@@ -1253,11 +1293,12 @@ def main():
         # Save the pipeline
         pipeline.save(pipeline_path)
 
-        # Update intel.yaml with new paths
+        # Update intel.yaml with new paths and preprocessing configuration
         updates = {
             'train_preprocessed_path': train_preprocessed_path,
             'test_preprocessed_path': test_preprocessed_path,
-            'preprocessing_pipeline_path': pipeline_path
+            'preprocessing_pipeline_path': pipeline_path,
+            'preprocessing_config': preprocessing_config
         }
         update_intel_yaml(intel_path, updates)
 

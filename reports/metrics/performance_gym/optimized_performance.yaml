@@ -1,8 +1,8 @@
-evaluation_timestamp: '2025-05-16 06:35:44'
-explained_variance_score: 0.9979164031240992
-max_error: 1.369099990724365
-mean_absolute_error: 0.2426477294543499
-mean_absolute_percentage_error: 0.009684392345453154
-mean_squared_error: 0.10190083765175105
-r2_score: 0.9979089329463126
-root_mean_squared_error: 0.31921910602554954
+evaluation_timestamp: '2025-05-16 11:59:07'
+explained_variance_score: 0.9983967955724055
+max_error: 1.3602347008864157
+mean_absolute_error: 0.2112201877410861
+mean_absolute_percentage_error: 0.008444870609473371
+mean_squared_error: 0.07823596585964154
+r2_score: 0.99839455048268
+root_mean_squared_error: 0.2797069285156189

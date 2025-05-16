@@ -19,6 +19,8 @@ from datetime import datetime
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 import warnings
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.utils.validation import check_is_fitted
 
 # Add parent directory to path for importing custom logger
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -196,6 +198,167 @@ class FeatureToolsTransformer(BaseEstimator, TransformerMixin):
             raise
 
 
+class SHAPFeatureSelector(BaseEstimator, TransformerMixin):
+    """
+    A transformer that uses SHAP values to select the most important features.
+    """
+
+    def __init__(self, n_features: int = 20, model=None):
+        logger.info(f"Initializing SHAPFeatureSelector with n_features={n_features}")
+        self.n_features = n_features
+        self.selected_features = None
+
+        # Default model is a RandomForestRegressor if none is provided
+        self.model = model if model is not None else RandomForestRegressor(n_estimators=100, random_state=42)
+
+        try:
+            import shap
+            self.shap = shap
+        except ImportError:
+            logger.error("SHAP package not found. Please install with: pip install shap")
+            raise ImportError("SHAP package not found")
+
+    def fit(self, X, y=None):
+        """
+        Fit the model and use SHAP to select the most important features.
+
+        Args:
+            X: DataFrame containing features
+            y: Series containing target variable
+
+        Returns:
+            Self
+        """
+        logger.info("SHAPFeatureSelector fit starting")
+
+        try:
+            if y is None:
+                logger.error("SHAPFeatureSelector requires target values for feature selection")
+                raise ValueError("Target values (y) are required for SHAP feature selection")
+
+            # Make a copy to avoid modifying the original data
+            X_copy = X.copy()
+
+            # Store column names
+            feature_names = list(X_copy.columns)
+            logger.info(f"Input data has {len(feature_names)} features")
+
+            # Limit n_features to the number of available features
+            self.n_features = min(self.n_features, len(feature_names))
+            logger.info(f"Will select {self.n_features} features")
+
+            # Check if X has enough samples for training
+            min_samples = 10  # Minimum samples needed for reasonable SHAP values
+            if X_copy.shape[0] < min_samples:
+                logger.warning(f"Not enough samples ({X_copy.shape[0]}) for reliable SHAP values. Using all features.")
+                self.selected_features = feature_names
+                return self
+
+            # Fit the model
+            logger.info(f"Fitting {self.model.__class__.__name__} for SHAP analysis")
+            self.model.fit(X_copy, y)
+
+            # Create explainer
+            logger.info("Creating SHAP explainer")
+            # Use TreeExplainer for tree-based models, KernelExplainer for others
+            if hasattr(self.model, 'estimators_'):
+                # Tree-based model
+                explainer = self.shap.TreeExplainer(self.model)
+                # Calculate SHAP values - for small datasets calculate on all data
+                if X_copy.shape[0] <= 1000:
+                    logger.info(f"Calculating SHAP values on all {X_copy.shape[0]} samples")
+                    shap_values = explainer.shap_values(X_copy)
+                else:
+                    # For larger datasets, use a sample
+                    sample_size = min(1000, int(X_copy.shape[0] * 0.3))
+                    logger.info(f"Calculating SHAP values on {sample_size} samples (dataset is large)")
+                    sample_indices = np.random.choice(X_copy.shape[0], sample_size, replace=False)
+                    shap_values = explainer.shap_values(X_copy.iloc[sample_indices])
+            else:
+                # Non-tree model - use KernelExplainer with a smaller sample
+                sample_size = min(100, int(X_copy.shape[0] * 0.2))
+                background = self.shap.kmeans(X_copy, sample_size)
+                explainer = self.shap.KernelExplainer(self.model.predict, background)
+                # Calculate SHAP values on a small sample
+                shap_sample_size = min(200, X_copy.shape[0])
+                logger.info(f"Calculating SHAP values on {shap_sample_size} samples (using KernelExplainer)")
+                sample_indices = np.random.choice(X_copy.shape[0], shap_sample_size, replace=False)
+                shap_values = explainer.shap_values(X_copy.iloc[sample_indices])
+
+            # For regression models, shap_values might be a single array
+            if isinstance(shap_values, list):
+                shap_values = shap_values[0]
+
+            # Calculate feature importance
+            logger.info("Calculating feature importance from SHAP values")
+            feature_importance = np.abs(shap_values).mean(axis=0)
+
+            # Create a DataFrame to store feature importance
+            importance_df = pd.DataFrame({
+                'feature': feature_names,
+                'importance': feature_importance
+            })
+
+            # Sort by importance and select top features
+            importance_df = importance_df.sort_values('importance', ascending=False)
+            self.selected_features = importance_df['feature'].head(self.n_features).tolist()
+
+            logger.info(f"Selected {len(self.selected_features)} most important features")
+            logger.debug(f"Selected features: {self.selected_features}")
+
+            return self
+
+        except Exception as e:
+            logger.error(f"Error in SHAPFeatureSelector fit: {str(e)}")
+            # If SHAP fails, fallback to using all features
+            logger.warning("Falling back to using all features due to error")
+            self.selected_features = list(X.columns)
+            return self
+
+    def transform(self, X):
+        """
+        Transform the data by selecting only the most important features.
+
+        Args:
+            X: DataFrame containing features
+
+        Returns:
+            DataFrame with only the selected features
+        """
+        logger.info("SHAPFeatureSelector transform starting")
+
+        try:
+            if self.selected_features is None:
+                logger.error("Transform called before fit. Please call fit first.")
+                raise ValueError("Transform called before fit")
+
+            # Make a copy of the input data
+            X_copy = X.copy()
+
+            # Check if all selected features are in X
+            missing_features = set(self.selected_features) - set(X_copy.columns)
+            if missing_features:
+                logger.warning(f"Some selected features are missing in the input data: {missing_features}")
+
+            # Only keep features that exist in the input data
+            available_features = [f for f in self.selected_features if f in X_copy.columns]
+
+            if not available_features:
+                logger.error("None of the selected features are available in the input data")
+                raise ValueError("No selected features available in input data")
+
+            logger.info(f"Selecting {len(available_features)} features from input data")
+            result = X_copy[available_features]
+
+            logger.info(f"Transformed data shape: {result.shape}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in SHAPFeatureSelector transform: {str(e)}")
+            logger.warning("Returning input data unchanged due to error")
+            return X
+
+
 class FeatureEngineer:
     """
     Main class for feature engineering process.
@@ -293,25 +456,48 @@ class FeatureEngineer:
             logger.error(f"Error loading feature store: {str(e)}")
             raise
 
-    def _update_intel(self) -> None:
-        """Update intel.yaml with new file paths"""
+    def _update_intel(self, use_feature_tools: bool, use_shap: bool, n_features: int) -> None:
+        """
+        Update intel.yaml with new file paths and user choices
+
+        Args:
+            use_feature_tools: Boolean indicating if FeatureTools was used
+            use_shap: Boolean indicating if SHAP feature selection was used
+            n_features: Number of features selected by SHAP
+        """
         try:
             # Find the intel.yaml in the main project folder
             current_dir = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.abspath(os.path.join(current_dir, "../.."))
             intel_path = os.path.join(project_root, "intel.yaml")
 
-            # Update the intel dictionary
+            # Update the intel dictionary with file paths
             self.intel["transformation_pipeline_path"] = self.transformation_pipeline_path
             self.intel["processor_pipeline_path"] = self.processor_pipeline_path
             self.intel["train_transformed_path"] = self.train_transformed_path
             self.intel["test_transformed_path"] = self.test_transformed_path
 
+            # Add user choices to intel
+            self.intel["feature_engineering_config"] = {
+                "use_feature_tools": use_feature_tools,
+                "use_shap_selection": use_shap,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+
+            if use_feature_tools:
+                self.intel["feature_engineering_config"]["primitives_used"] = [
+                    "add_numeric", "multiply_numeric", "divide_numeric", "subtract_numeric"
+                ]
+                self.intel["feature_engineering_config"]["max_depth"] = 1
+
+            if use_shap:
+                self.intel["feature_engineering_config"]["n_features_selected"] = n_features
+
             # Write the updated intel dictionary back to the file
             with open(intel_path, 'w') as f:
                 yaml.dump(self.intel, f, default_flow_style=False)
 
-            logger.info(f"Updated intel.yaml with new paths")
+            logger.info(f"Updated intel.yaml with new paths and feature engineering choices")
 
         except Exception as e:
             logger.error(f"Error updating intel.yaml: {str(e)}")
@@ -425,20 +611,55 @@ class FeatureEngineer:
         logger.info(f"X_test shape: {X_test.shape}")
 
         # Ask user whether to use feature tools
-        use_feature_tools = input(
+        use_feature_tools_input = input(
             "Do you want to use FeatureTools for automatic feature engineering? (yes/no): ").strip().lower()
 
-        # Create transformation pipeline based on user choice
-        if use_feature_tools in ["yes", "y"]:
+        # Convert user input to boolean
+        use_feature_tools = use_feature_tools_input in ["yes", "y"]
+
+        # Create transformation pipeline steps list
+        pipeline_steps = []
+
+        # Add feature engineering step if requested
+        if use_feature_tools:
             logger.info("User opted to use FeatureTools for feature engineering")
-            transformation_pipeline = Pipeline([
+            pipeline_steps.append(
                 ('feature_tools', FeatureToolsTransformer(target_col=self.target_column))
-            ])
+            )
         else:
             logger.info("User opted not to use feature engineering - using identity transformer")
-            transformation_pipeline = Pipeline([
+            pipeline_steps.append(
                 ('identity', IdentityTransformer())
-            ])
+            )
+
+        # Ask if user wants to use SHAP for feature selection
+        use_shap_input = input(
+            "Do you want to use SHAP for feature selection? (yes/no): ").strip().lower()
+
+        # Convert user input to boolean
+        use_shap = use_shap_input in ["yes", "y"]
+        n_features = 0
+
+        # Add SHAP feature selection if requested
+        if use_shap:
+            # Ask user for number of features to select
+            while True:
+                try:
+                    n_features = int(input("How many features do you want to select? "))
+                    if n_features <= 0:
+                        print("Please enter a positive number.")
+                    else:
+                        break
+                except ValueError:
+                    print("Please enter a valid number.")
+
+            logger.info(f"User opted to use SHAP for feature selection with {n_features} features")
+            pipeline_steps.append(
+                ('shap_selector', SHAPFeatureSelector(n_features=n_features))
+            )
+
+        # Create the transformation pipeline
+        transformation_pipeline = Pipeline(pipeline_steps)
 
         # Fit the transformation pipeline on training data
         section("FITTING TRANSFORMATION PIPELINE", logger)
@@ -467,6 +688,38 @@ class FeatureEngineer:
             # Ensure all columns have string names
             X_train_transformed.columns = [str(col) for col in X_train_transformed.columns]
             X_test_transformed.columns = [str(col) for col in X_test_transformed.columns]
+
+            # Ensure train and test have the same columns
+            train_cols = set(X_train_transformed.columns)
+            test_cols = set(X_test_transformed.columns)
+
+            if train_cols != test_cols:
+                logger.warning("Column mismatch between train and test data after transformation")
+                logger.warning(f"Train has {len(train_cols)} columns, test has {len(test_cols)} columns")
+
+                # Find missing columns
+                missing_in_test = train_cols - test_cols
+                missing_in_train = test_cols - train_cols
+
+                if missing_in_test:
+                    logger.warning(f"Columns in train but not in test: {missing_in_test}")
+                    # Add missing columns to test with zeros
+                    for col in missing_in_test:
+                        X_test_transformed[col] = 0
+
+                if missing_in_train:
+                    logger.warning(f"Columns in test but not in train: {missing_in_train}")
+                    # Add missing columns to train with zeros
+                    for col in missing_in_train:
+                        X_train_transformed[col] = 0
+
+                # Ensure same column order
+                X_train_transformed = X_train_transformed[sorted(X_train_transformed.columns)]
+                X_test_transformed = X_test_transformed[sorted(X_test_transformed.columns)]
+
+                logger.info("Column alignment completed")
+                logger.info(f"Final train shape: {X_train_transformed.shape}")
+                logger.info(f"Final test shape: {X_test_transformed.shape}")
 
             # Add target column back
             train_transformed_df = X_train_transformed.copy()
@@ -540,8 +793,28 @@ class FeatureEngineer:
             # Save processor pipeline
             self._save_pipeline(processor_pipeline, self.processor_pipeline_path)
 
-            # Update intel.yaml
-            self._update_intel()
+            # Update intel.yaml with file paths and user choices
+            self._update_intel(use_feature_tools, use_shap, n_features)
+
+            # Log feature engineering metadata
+            feature_info = []
+
+            if use_feature_tools:
+                logger.info("Feature engineering completed using FeatureTools")
+                if hasattr(transformation_pipeline.named_steps['feature_tools'], 'feature_names'):
+                    num_generated = len(transformation_pipeline.named_steps['feature_tools'].feature_names)
+                    logger.info(f"Generated {num_generated} engineered features")
+            else:
+                logger.info("Feature engineering completed using Identity transformation (no feature engineering)")
+
+            if use_shap:
+                logger.info("Feature selection completed using SHAP")
+
+                # Log top features if available
+                if hasattr(transformation_pipeline.named_steps['feature_selector'], 'importance_scores'):
+                    importance = transformation_pipeline.named_steps['feature_selector'].importance_scores
+                    top_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:10]
+                    logger.info(f"Top 10 most important features: {[f[0] for f in top_features]}")
 
             logger.info("Feature engineering process completed successfully")
 
