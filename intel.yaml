@@ -1,9 +1,16 @@
+best_params_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports\metrics\best_params_gym\params.yaml
 dataset_name: gym
+evaluation_timestamp: '2025-05-16 06:35:44'
 feature_store_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\references\feature_store_gym\feature_store.yaml
 model_name: CatBoost
 model_path: models\model_gym\model.pkl
-model_timestamp: '2025-05-16 04:47:45'
+model_timestamp: '2025-05-16 05:09:51'
+optimization_timestamp: '2025-05-16 06:23:06'
+optimized_evaluation_timestamp: '2025-05-16 06:35:44'
+optimized_model_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\models\model_gym\optimized_model.pkl
+optimized_performance_metrics_path: reports\metrics\performance_gym\optimized_performance.yaml
 original_file_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\external\gym.csv
+performance_metrics_path: reports\metrics\performance_gym\performance.yaml
 plots_dir: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports/figures\plots_gym
 preprocessing_pipeline_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\src\data\..\..\models\pipelines\preprocessing_gym\preprocessing.pkl
 processed_timestamp: '2025-05-16 02:23:13'

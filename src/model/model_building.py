@@ -33,29 +33,34 @@ from sklearn.neural_network import MLPRegressor
 # Import advanced ensemble models
 try:
     import xgboost as xgb
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
 
 try:
     import lightgbm as lgb
+
     LIGHTGBM_AVAILABLE = True
 except ImportError:
     LIGHTGBM_AVAILABLE = False
 
 try:
     import catboost as cb
+
     CATBOOST_AVAILABLE = True
 except ImportError:
     CATBOOST_AVAILABLE = False
 
 # Import the custom logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from logger import section, configure_logger
 import logging
+from src.logger import section, configure_logger  # Configure logger
 
-logger = logging.getLogger(__name__)
+# Configure logger
 configure_logger()
+logger = logging.getLogger("Model Building")
+
 
 class ModelBuilder:
     """
@@ -352,7 +357,8 @@ class ModelBuilder:
 
         return model_choice, model_info
 
-    def train_model(self, model_name: str, model_info: Dict[str, Any], X_train: pd.DataFrame, y_train: pd.Series) -> Any:
+    def train_model(self, model_name: str, model_info: Dict[str, Any], X_train: pd.DataFrame,
+                    y_train: pd.Series) -> Any:
         """
         Train the selected model
 

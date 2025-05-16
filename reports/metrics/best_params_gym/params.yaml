@@ -1,0 +1,6 @@
+border_count: 99
+depth: 4
+iterations: 195
+l2_leaf_reg: 1
+learning_rate: 0.09817663960439085
+verbose: false

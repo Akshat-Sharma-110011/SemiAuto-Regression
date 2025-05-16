@@ -30,7 +30,7 @@ from src.logger import section, configure_logger
 
 # Configure logger
 configure_logger()
-logger = logging.getLogger("Data Preprocessing")
+logger = logging.getLogger("Feature Engineering")
 
 
 class IdentityTransformer(BaseEstimator, TransformerMixin):
