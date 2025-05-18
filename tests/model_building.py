@@ -5,7 +5,6 @@
 This script handles model selection, training, and storing for regression problems.
 It provides a selection of regression models including advanced ensemble models,
 allows for custom hyperparameter tuning, and stores the trained model.
-API-friendly version for integration with FastAPI.
 """
 
 import os
@@ -58,6 +57,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
 from src.logger import section, configure_logger  # Configure logger
 
+with open('intel.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+    dataset_name = config['dataset_name']
+
 # Configure logger
 configure_logger()
 logger = logging.getLogger("Model Building")
@@ -66,7 +69,6 @@ logger = logging.getLogger("Model Building")
 class ModelBuilder:
     """
     A class to build, tune, and save regression models for the AutoML pipeline.
-    API-friendly version for integration with FastAPI.
     """
 
     def __init__(self, intel_path: str = "intel.yaml"):
@@ -285,103 +287,79 @@ class ModelBuilder:
             logger.error(f"Error loading data: {e}")
             raise
 
-    def get_available_models(self) -> Dict[str, Dict]:
+    def select_model(self) -> Tuple[str, Dict[str, Any]]:
         """
-        API-friendly method to get available models and their default parameters.
+        Display available models and let the user select one.
 
         Returns:
-            Dictionary with model names, descriptions and default parameters
+            model_name: Name of the selected model
+            model_info: Dictionary with model class and parameters
         """
-        models_info = {}
+        section("Model Selection", logger)
 
-        for model_name, model_data in self.available_models.items():
-            # Don't include the class object, just params and description
-            models_info[model_name] = {
-                "params": model_data["params"],
-                "description": model_data["description"]
-            }
+        logger.info("Available regression models:")
+        for i, (model_name, model_info) in enumerate(self.available_models.items(), 1):
+            logger.info(f"{i}. {model_name} - {model_info['description']}")
 
-        return models_info
+        valid_selection = False
+        model_choice = None
 
-    def process_model_request(self, model_name: str, custom_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        API-friendly method to process a model request.
-
-        Args:
-            model_name: Name of the model to train
-            custom_params: Optional dictionary of custom parameters to use
-
-        Returns:
-            Dictionary with model information
-        """
-        section(f"Processing model request for {model_name}", logger)
-
-        # Check if model exists
-        if model_name not in self.available_models:
-            error_msg = f"Model '{model_name}' not found. Available models: {list(self.available_models.keys())}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-
-        # Get model info and apply custom parameters if provided
-        model_info = self.available_models[model_name].copy()
-        if custom_params:
-            # Apply custom parameters with type checking
-            for param_name, param_value in custom_params.items():
-                # Check if the parameter exists in the default parameters
-                if param_name in model_info['params']:
-                    # Get the default value's type
-                    default_value = model_info['params'][param_name]
-                    # Cast the custom value to the same type as the default
-                    try:
-                        if isinstance(default_value, bool):
-                            # Handle booleans which might come as strings
-                            if isinstance(param_value, str):
-                                # Convert string 'true' or 'false' to boolean
-                                cast_value = param_value.lower() == 'true'
-                            else:
-                                cast_value = bool(param_value)
-                        elif isinstance(default_value, int):
-                            # Cast to int, allowing for float strings (e.g., '5' -> 5)
-                            cast_value = int(float(param_value)) if isinstance(param_value, str) else int(param_value)
-                        elif isinstance(default_value, float):
-                            cast_value = float(param_value)
-                        else:
-                            # For other types (str, etc.), use as is
-                            cast_value = param_value
-                        model_info['params'][param_name] = cast_value
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to cast parameter '{param_name}' value '{param_value}' to type {type(default_value)}: {e}")
-                        raise ValueError(f"Invalid value for parameter '{param_name}': {param_value}")
+        while not valid_selection:
+            try:
+                model_idx = int(input("\nSelect a model by entering its number: "))
+                if 1 <= model_idx <= len(self.available_models):
+                    model_choice = list(self.available_models.keys())[model_idx - 1]
+                    valid_selection = True
                 else:
-                    # Add new parameter not present in defaults
-                    model_info['params'][param_name] = param_value
-            logger.info(f"Applied custom parameters: {custom_params}")
+                    print(f"Please enter a number between 1 and {len(self.available_models)}")
+            except ValueError:
+                print("Please enter a valid number")
 
-        try:
-            # Load data
-            X_train, y_train, X_test, y_test = self.load_data()
+        model_info = self.available_models[model_choice]
+        logger.info(f"Selected model: {model_choice}")
 
-            # Train model
-            model = self.train_model(model_name, model_info, X_train, y_train)
+        # Ask if user wants to customize hyperparameters
+        customize = input("\nDo you want to customize the model hyperparameters? (y/n): ").lower().strip()
 
-            # Save model
-            model_path = self.save_model(model, model_name)
+        if customize == 'y':
+            logger.info("Default parameters:")
+            for param, value in model_info['params'].items():
+                print(f"  {param}: {value}")
 
-            # Return result
-            result = {
-                'model_name': model_name,
-                'model_path': model_path,
-                'parameters': model_info['params'],
-                'status': 'success'
-            }
+            print("\nEnter new parameters (press Enter to keep default, enter 'None' to set to None):")
+            new_params = {}
 
-            return result
+            for param, default_value in model_info['params'].items():
+                new_value = input(f"  {param} (default: {default_value}): ").strip()
 
-        except Exception as e:
-            error_msg = f"Error processing model request: {str(e)}"
-            logger.error(error_msg)
-            raise
+                if new_value:
+                    if new_value.lower() == 'none':
+                        new_params[param] = None
+                    elif isinstance(default_value, bool):
+                        new_params[param] = new_value.lower() == 'true'
+                    elif isinstance(default_value, int):
+                        new_params[param] = int(new_value)
+                    elif isinstance(default_value, float):
+                        new_params[param] = float(new_value)
+                    elif isinstance(default_value, tuple):
+                        # Parse tuple of integers like (100, 50, 25)
+                        try:
+                            # Remove parentheses and split by commas
+                            values = new_value.strip('()').split(',')
+                            new_params[param] = tuple(int(v.strip()) for v in values)
+                        except ValueError:
+                            logger.warning(f"Could not parse {new_value} as tuple, keeping default: {default_value}")
+                            new_params[param] = default_value
+                    else:
+                        new_params[param] = new_value
+
+            # Update the parameters
+            model_info['params'].update(new_params)
+            logger.info("Updated parameters:")
+            for param, value in model_info['params'].items():
+                logger.info(f"  {param}: {value}")
+
+        return model_choice, model_info
 
     def train_model(self, model_name: str, model_info: Dict[str, Any], X_train: pd.DataFrame,
                     y_train: pd.Series) -> Any:
@@ -454,9 +432,50 @@ class ModelBuilder:
             logger.error(f"Error saving model: {e}")
             raise
 
+    def run(self) -> Dict[str, Any]:
+        """
+        Run the entire model building process
 
-# For backward compatibility with command-line usage
+        Returns:
+            Dictionary with model information
+        """
+        section("MODEL BUILDING PROCESS", logger, char='#', length=80)
+
+        try:
+            # Load data
+            X_train, y_train, X_test, y_test = self.load_data()
+
+            # Select model
+            model_name, model_info = self.select_model()
+
+            # Train model
+            model = self.train_model(model_name, model_info, X_train, y_train)
+
+            # Save model
+            model_path = self.save_model(model, model_name)
+
+            result = {
+                'model_name': model_name,
+                'model_path': model_path,
+                'model_info': model_info
+            }
+
+            section("MODEL BUILDING COMPLETED SUCCESSFULLY", logger, char='#', length=80)
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in model building process: {e}")
+            section("MODEL BUILDING FAILED", logger, level=logging.ERROR, char='#', length=80)
+            raise
+
+
 if __name__ == "__main__":
-    print("This script is intended to be used as a module by the FastAPI application.")
-    print("For command-line usage, please use the original model_building.py script.")
-    sys.exit(1)
+    # Set up the model builder and run
+    try:
+        model_builder = ModelBuilder()
+        result = model_builder.run()
+        logger.info(f"Model built successfully: {result['model_name']}")
+    except Exception as e:
+        logger.error(f"Model building failed: {str(e)}")
+        sys.exit(1)

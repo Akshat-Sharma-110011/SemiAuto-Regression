@@ -25,3 +25,4 @@ reportlab
 PyYAML
 fpdf
 dvc
+fastapi

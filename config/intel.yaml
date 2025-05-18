@@ -1,0 +1,3 @@
+dataset_name: default
+feature_store_path: config\feature_store.yaml
+target_column: target

@@ -33,18 +33,25 @@ from sklearn.preprocessing import (
     LabelEncoder
 )
 import scipy.stats as stats
+from pydantic import BaseModel
 
 # Set up the logger
 from src.logger import section, configure_logger
-
-with open('intel.yaml', 'r') as f:
-    config = yaml.safe_load(f)
-    dataset_name = config['dataset_name']
 
 # Configure logger
 configure_logger()
 logger = logging.getLogger("Data Preprocessing")
 
+def get_dataset_name():
+    """Lazily load dataset name when needed"""
+    try:
+        with open('intel.yaml', 'r') as f:
+            config = yaml.safe_load(f)
+            return config['dataset_name']
+    except FileNotFoundError:
+        return "default_dataset"  # Temporary placeholder
+
+dataset_name = get_dataset_name()
 
 class OutlierHandler(BaseEstimator, TransformerMixin):
     """
@@ -167,6 +174,25 @@ class OutlierHandler(BaseEstimator, TransformerMixin):
         return X_transformed
 
 
+class IDColumnDropper(BaseEstimator, TransformerMixin):
+    def __init__(self, id_cols: List[str]):
+        self.id_columns = id_cols
+        logger.info(f"Initialized ID column dropper with columns: {id_cols}")
+
+    def fit(self, X, y=None):
+        # Verify which ID columns exist in the dataframe
+        existing_cols = [col for col in self.id_columns if col in X.columns]
+        logger.info(f"Found {len(existing_cols)}/{len(self.id_columns)} ID columns in data")
+        return self
+
+    def transform(self, X):
+        columns_to_drop = [col for col in self.id_columns if col in X.columns]
+        if columns_to_drop:
+            logger.info(f"Dropping ID columns: {columns_to_drop}")
+            return X.drop(columns=columns_to_drop)
+        return X
+
+
 class MissingValueHandler(BaseEstimator, TransformerMixin):
     """
     Custom transformer for handling missing values using specified method.
@@ -216,16 +242,20 @@ class MissingValueHandler(BaseEstimator, TransformerMixin):
                 logger.warning(f"Column {col} not found in input data")
                 continue
 
-            if self.method == 'mean':
-                self.fill_values[col] = X[col].mean()
-                logger.info(f"Mean value for {col}: {self.fill_values[col]:.4f}")
-
-            elif self.method == 'median':
-                self.fill_values[col] = X[col].median()
-                logger.info(f"Median value for {col}: {self.fill_values[col]:.4f}")
-
+            # Check if the method is appropriate for the column's data type
+            if self.method in ['mean', 'median']:
+                if pd.api.types.is_numeric_dtype(X[col]):
+                    if self.method == 'mean':
+                        self.fill_values[col] = X[col].mean()
+                    elif self.method == 'median':
+                        self.fill_values[col] = X[col].median()
+                    logger.info(f"{self.method.capitalize()} value for {col}: {self.fill_values[col]:.4f}")
+                else:
+                    # Fallback to mode for non-numeric columns if mean/median is selected
+                    logger.warning(f"Column {col} is non-numeric. Using mode instead of {self.method}.")
+                    self.fill_values[col] = X[col].mode()[0]
+                    logger.info(f"Mode value for {col}: {self.fill_values[col]}")
             elif self.method == 'mode':
-                # Get most frequent value
                 self.fill_values[col] = X[col].mode()[0]
                 logger.info(f"Mode value for {col}: {self.fill_values[col]}")
 
@@ -517,7 +547,11 @@ class CategoricalEncoder(BaseEstimator, TransformerMixin):
                 continue
 
             if self.method == 'onehot':
-                encoder = OneHotEncoder(sparse_output=False, drop='first' if self.drop_first else None)
+                encoder = OneHotEncoder(
+                    sparse_output=False,
+                    drop='first' if self.drop_first else None,
+                    handle_unknown='ignore'  # Add this parameter
+                )
                 encoder.fit(X[col].values.reshape(-1, 1))
                 self.encoders[col] = encoder
                 logger.info(f"Fitted OneHotEncoder for {col}")
@@ -612,29 +646,101 @@ class CategoricalEncoder(BaseEstimator, TransformerMixin):
         return X_transformed
 
 
-class PreprocessingPipeline:
-    """
-    Main preprocessing pipeline that orchestrates the preprocessing steps.
-    """
+class PreprocessingParameters(BaseModel):
+    """Pydantic model for preprocessing parameters"""
+    # Missing Values Handling
+    missing_values_method: str = 'mean'
+    missing_values_columns: List[str] = []
 
-    def __init__(self, config: Dict[str, Any]):
+    # Duplicates Handling
+    handle_duplicates: bool = True
+
+    # Outlier Handling
+    outliers_method: Optional[str] = None
+    outliers_columns: List[str] = []
+
+    # Skewness Handling
+    skewness_method: Optional[str] = None
+    skewness_columns: List[str] = []
+
+    # Numerical Scaling
+    scaling_method: Optional[str] = None
+    scaling_columns: List[str] = []
+
+    # Categorical Encoding
+    categorical_encoding_method: Optional[str] = None
+    categorical_columns: List[str] = []
+    drop_first: bool = True
+
+
+class PreprocessingPipeline:
+    """API-friendly preprocessing pipeline with configuration based on parameters"""
+
+    def __init__(self, config: Dict[str, Any], params: PreprocessingParameters):
         """
-        Initialize the PreprocessingPipeline.
+        Initialize with both original config and API parameters
 
         Args:
-            config (Dict[str, Any]): Configuration dictionary with preprocessing parameters
+            config: Original configuration from intel.yaml
+            params: Preprocessing parameters from API request
         """
-        self.config = config
+        self.config = get_intel_config()
+        self.params = params
         self.dataset_name = config.get('dataset_name')
         self.target_column = config.get('target_col')
         self.feature_store = config.get('feature_store', {})
+
+        # Initialize handlers
         self.missing_handler = None
         self.outlier_handler = None
         self.skewed_handler = None
         self.numerical_scaler = None
         self.categorical_encoder = None
+        self.id_dropper = IDColumnDropper(
+            id_cols=self.feature_store.get('id_cols', [])
+        )
 
-        logger.info(f"Initialized PreprocessingPipeline for dataset: {self.dataset_name}")
+        logger.info(f"Initialized API PreprocessingPipeline for dataset: {self.dataset_name}")
+
+    def configure_pipeline(self):
+        """Configure pipeline based on received parameters"""
+        # Missing values handling
+        if self.params.missing_values_columns:
+            self.missing_handler = MissingValueHandler(
+                method=self.params.missing_values_method,
+                columns=self.params.missing_values_columns
+            )
+
+        self.id_dropper = IDColumnDropper()
+
+        # Outlier handling
+        if self.params.outliers_method and self.params.outliers_columns:
+            self.outlier_handler = OutlierHandler(
+                method=self.params.outliers_method,
+                columns=self.params.outliers_columns
+            )
+
+        # Skewed data handling
+        if self.params.skewness_method and self.params.skewness_columns:
+            self.skewed_handler = SkewedDataHandler(
+                method=self.params.skewness_method,
+                columns=self.params.skewness_columns
+            )
+
+        # Numerical scaling
+        if self.params.scaling_method and self.params.scaling_columns:
+            self.numerical_scaler = NumericalScaler(
+                method=self.params.scaling_method,
+                columns=self.params.scaling_columns
+            )
+
+        # Categorical encoding
+        if self.params.categorical_encoding_method and self.params.categorical_columns:
+            self.categorical_encoder = CategoricalEncoder(
+                method=self.params.categorical_encoding_method,
+                columns=self.params.categorical_columns,
+                drop_first=self.params.drop_first
+            )
 
     def handle_missing_values(self, method: str = 'mean', columns: List[str] = None):
         """
@@ -723,6 +829,9 @@ class PreprocessingPipeline:
         """
         logger.info("Fitting preprocessing pipeline")
 
+        if self.id_dropper:
+            self.id_dropper.fit(X)
+
         # Fit the missing value handler if defined
         if self.missing_handler:
             self.missing_handler.fit(X)
@@ -756,6 +865,10 @@ class PreprocessingPipeline:
         """
         logger.info("Transforming data with preprocessing pipeline")
         transformed_data = X.copy()
+
+        # Apply ID column dropper first
+        if self.id_dropper:
+            transformed_data = self.id_dropper.transform(transformed_data)
 
         # Handle duplicates if requested
         if handle_duplicates:
@@ -822,6 +935,153 @@ class PreprocessingPipeline:
         return pipeline
 
 
+def validate_and_sanitize_parameters(params: PreprocessingParameters, feature_store: Dict) -> PreprocessingParameters:
+    """Validate and sanitize preprocessing parameters against feature store"""
+    validated = params.dict()
+
+    # Validate missing values columns
+    valid_missing = [col for col in validated['missing_values_columns']
+                     if col in feature_store.get('contains_null', [])]
+    validated['missing_values_columns'] = valid_missing
+
+    # Validate outlier columns
+    valid_outliers = [col for col in validated['outliers_columns']
+                      if col in feature_store.get('contains_outliers', [])]
+    validated['outliers_columns'] = valid_outliers
+
+    # Validate skewness columns
+    valid_skewness = [col for col in validated['skewness_columns']
+                      if col in feature_store.get('skewed_cols', [])]
+    validated['skewness_columns'] = valid_skewness
+
+    return PreprocessingParameters(**validated)
+
+
+async def api_preprocessing_workflow(
+        train_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+        params: PreprocessingParameters,
+        config: Dict
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
+    """
+    API-friendly preprocessing workflow
+
+    Args:
+        train_df: Training dataframe
+        test_df: Test dataframe
+        params: Preprocessing parameters
+        config: Application config from intel.yaml
+
+    Returns:
+        Tuple of (train_preprocessed, test_preprocessed, preprocessing_config)
+    """
+    try:
+        section("API PREPROCESSING WORKFLOW", logger)
+
+        # Load feature store
+        feature_store_path = config.get('feature_store_path')
+        feature_store = load_yaml(feature_store_path)
+
+        # Validate parameters against feature store
+        validated_params = validate_and_sanitize_parameters(params, feature_store)
+
+        # Initialize pipeline
+        pipeline = PreprocessingPipeline(config, validated_params)
+        pipeline.configure_pipeline()
+
+        # Fit and transform
+        section("FITTING PIPELINE", logger)
+        pipeline.fit(train_df)
+
+        section("TRANSFORMING DATA", logger)
+        train_preprocessed = pipeline.transform(
+            train_df,
+            handle_duplicates=validated_params.handle_duplicates
+        )
+        test_preprocessed = pipeline.transform(
+            test_df,
+            handle_duplicates=False  # Never drop duplicates from test data
+        )
+
+        # Collect preprocessing config for response
+        preprocessing_config = {
+            'missing_values': {
+                'method': validated_params.missing_values_method,
+                'columns': validated_params.missing_values_columns
+            },
+            'outliers': {
+                'method': validated_params.outliers_method,
+                'columns': validated_params.outliers_columns
+            },
+            'skewness': {
+                'method': validated_params.skewness_method,
+                'columns': validated_params.skewness_columns
+            },
+            'scaling': {
+                'method': validated_params.scaling_method,
+                'columns': validated_params.scaling_columns
+            },
+            'categorical_encoding': {
+                'method': validated_params.categorical_encoding_method,
+                'columns': validated_params.categorical_columns,
+                'drop_first': validated_params.drop_first
+            }
+        }
+
+        # Move target column to last position if present
+        target_column = config.get('target_column')
+        if target_column in train_preprocessed.columns:
+            cols = [col for col in train_preprocessed.columns if col != target_column] + [target_column]
+            train_preprocessed = train_preprocessed[cols]
+            test_preprocessed = test_preprocessed[cols]
+
+        return train_preprocessed, test_preprocessed, preprocessing_config
+
+    except Exception as e:
+        logger.error(f"API Preprocessing failed: {str(e)}")
+        raise
+
+
+def save_preprocessing_artifacts(
+        train_preprocessed: pd.DataFrame,
+        test_preprocessed: pd.DataFrame,
+        pipeline: PreprocessingPipeline,
+        config: Dict
+):
+    """Save preprocessing results and pipeline"""
+    try:
+        # Create output directories
+        interim_dir = Path(config.get('interim_dir', 'data/interim'))
+        interim_dir.mkdir(parents=True, exist_ok=True)
+
+        pipeline_dir = Path(config.get('pipeline_dir', 'model/pipelines'))
+        pipeline_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save preprocessed data
+        train_preprocessed_path = interim_dir / 'train_preprocessed.csv'
+        test_preprocessed_path = interim_dir / 'test_preprocessed.csv'
+        train_preprocessed.to_csv(train_preprocessed_path, index=False)
+        test_preprocessed.to_csv(test_preprocessed_path, index=False)
+
+        # Save pipeline
+        pipeline_path = pipeline_dir / 'preprocessing.pkl'
+        pipeline.save(pipeline_path)
+
+        # Update config
+        config.update({
+            'train_preprocessed_path': str(train_preprocessed_path),
+            'test_preprocessed_path': str(test_preprocessed_path),
+            'preprocessing_pipeline_path': str(pipeline_path),
+            'preprocessed_timestamp': datetime.now().isoformat()
+        })
+
+        return config
+
+    except Exception as e:
+        logger.error(f"Failed to save preprocessing artifacts: {str(e)}")
+        raise
+
+
 def load_yaml(file_path: str) -> Dict:
     """
     Load YAML file into a dictionary.
@@ -838,6 +1098,20 @@ def load_yaml(file_path: str) -> Dict:
     except Exception as e:
         logger.error(f"Error loading YAML file {file_path}: {str(e)}")
         raise
+
+def get_intel_config():
+    """Safely load intel.yaml with validation"""
+    try:
+        with open('intel.yaml', 'r') as f:
+            config = yaml.safe_load(f)
+            # Validate critical keys
+            if not config or 'dataset_name' not in config:
+                raise ValueError("intel.yaml is missing required keys")
+            return config
+    except FileNotFoundError:
+        raise RuntimeError("intel.yaml not found. Complete data ingestion first!")
+    except Exception as e:
+        raise RuntimeError(f"Invalid intel.yaml: {str(e)}")
 
 
 def update_intel_yaml(intel_path: str, updates: Dict) -> None:
@@ -885,7 +1159,6 @@ def check_for_duplicates(df: pd.DataFrame) -> bool:
     else:
         logger.info("No duplicate rows found")
         return False
-
 
 def check_for_skewness(df: pd.DataFrame, columns: List[str], threshold: float = 0.5) -> Dict[str, float]:
     """

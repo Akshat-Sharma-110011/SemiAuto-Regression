@@ -1,0 +1,283 @@
+{% extends "base.html" %}
+
+{% block title %}SemiAuto Regression - Model Building{% endblock %}
+
+{% block content %}
+<div class="main-content">
+    <h1 class="section-title">Model Building</h1>
+    <p>Select a regression algorithm to build your model.</p>
+
+    <div class="card">
+        <div class="card-header">Choose Model</div>
+        <form id="modelBuildingForm">
+            <div class="form-group">
+                <label for="modelName">Regression Algorithm</label>
+                <select id="modelName" name="model_name" required>
+                    <option value="" disabled selected>Select a model</option>
+                    {% for model_name in available_models %}
+                    <option value="{{ model_name }}">{{ model_name }}</option>
+                    {% endfor %}
+                </select>
+                </select>
+            </div>
+
+            <div id="customParamsContainer" class="form-group hidden">
+                <label>Model Parameters</label>
+                <div id="paramFields"></div>
+            </div>
+
+            <div class="form-group">
+                <button type="submit" class="btn btn-primary" onclick="buildModel(event)">Build Model</button>
+            </div>
+        </form>
+        <div id="spinner" class="spinner hidden"></div>
+        <div id="buildStatus" class="alert hidden"></div>
+    </div>
+
+    <div class="card hidden" id="evaluationResults">
+        <div class="card-header">Initial Evaluation Results</div>
+        <div id="evaluationDetails"></div>
+        <div class="metrics-container" id="metricsContainer"></div>
+        <div class="form-group">
+            <a href="/optimization" class="btn btn-success">Continue to Optimization</a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+    // Store model definitions for parameter forms
+    let modelDefinitions = {};
+
+    document.addEventListener('DOMContentLoaded', async function() {
+        try {
+            // Load available models with their parameters
+            const response = await fetch('/api/available-models');
+            modelDefinitions = await response.json();
+
+            // Set up model selection change handler
+            const modelSelect = document.getElementById('modelName');
+            modelSelect.addEventListener('change', updateParameterForm);
+        } catch (error) {
+            console.error('Error loading models:', error);
+        }
+    });
+
+    function updateParameterForm() {
+        const modelSelect = document.getElementById('modelName');
+        const selectedModelId = modelSelect.value;
+        const customParamsContainer = document.getElementById('customParamsContainer');
+        const paramFields = document.getElementById('paramFields');
+
+        // Clear previous fields
+        paramFields.innerHTML = '';
+
+        if (!selectedModelId || !modelDefinitions[selectedModelId] || !modelDefinitions[selectedModelId].params) {
+            customParamsContainer.classList.add('hidden');
+            return;
+        }
+
+        const params = modelDefinitions[selectedModelId].params;
+
+        if (Object.keys(params).length > 0) {
+            customParamsContainer.classList.remove('hidden');
+
+            // Create form fields for each parameter
+            for (const [paramName, paramDetails] of Object.entries(params)) {
+                const paramContainer = document.createElement('div');
+                paramContainer.className = 'form-group';
+
+                const paramLabel = document.createElement('label');
+                paramLabel.setAttribute('for', `param_${paramName}`);
+                paramLabel.textContent = paramDetails.display_name || paramName;
+
+                let paramInput;
+
+                // Create appropriate input based on parameter type
+                if (paramDetails.type === 'select' && Array.isArray(paramDetails.options)) {
+                    paramInput = document.createElement('select');
+                    paramDetails.options.forEach(option => {
+                        const optionEl = document.createElement('option');
+                        optionEl.value = option.value;
+                        optionEl.textContent = option.display;
+                        if (option.value === paramDetails.default) {
+                            optionEl.selected = true;
+                        }
+                        paramInput.appendChild(optionEl);
+                    });
+                } else if (paramDetails.type === 'bool') {
+                    paramInput = document.createElement('select');
+                    const options = [
+                        { value: 'true', display: 'True' },
+                        { value: 'false', display: 'False' }
+                    ];
+                    options.forEach(option => {
+                        const optionEl = document.createElement('option');
+                        optionEl.value = option.value;
+                        optionEl.textContent = option.display;
+                        if (option.value === String(paramDetails.default)) {
+                            optionEl.selected = true;
+                        }
+                        paramInput.appendChild(optionEl);
+                    });
+                } else if (paramDetails.type === 'float') {
+                    paramInput = document.createElement('input');
+                    paramInput.type = 'number';
+                    paramInput.step = '0.01';
+                    if (paramDetails.default !== undefined) paramInput.value = paramDetails.default;
+                    if (paramDetails.min !== undefined) paramInput.min = paramDetails.min;
+                    if (paramDetails.max !== undefined) paramInput.max = paramDetails.max;
+                } else if (paramDetails.type === 'int') {
+                    paramInput = document.createElement('input');
+                    paramInput.type = 'number';
+                    paramInput.step = '1';
+                    if (paramDetails.default !== undefined) paramInput.value = paramDetails.default;
+                    if (paramDetails.min !== undefined) paramInput.min = paramDetails.min;
+                    if (paramDetails.max !== undefined) paramInput.max = paramDetails.max;
+                } else {
+                    // Default to text input
+                    paramInput = document.createElement('input');
+                    paramInput.type = 'text';
+                    if (paramDetails.default !== undefined) paramInput.value = paramDetails.default;
+                }
+
+                paramInput.id = `param_${paramName}`;
+                paramInput.name = `params.${paramName}`;
+                paramInput.className = 'param-input';
+
+                // Add description if available
+                let paramDescription;
+                if (paramDetails.description) {
+                    paramDescription = document.createElement('small');
+                    paramDescription.textContent = paramDetails.description;
+                }
+
+                paramContainer.appendChild(paramLabel);
+                paramContainer.appendChild(paramInput);
+                if (paramDescription) paramContainer.appendChild(paramDescription);
+
+                paramFields.appendChild(paramContainer);
+            }
+        } else {
+            customParamsContainer.classList.add('hidden');
+        }
+    }
+
+    async function buildModel(event) {
+        event.preventDefault();
+
+        const form = document.getElementById('modelBuildingForm');
+        const buildStatus = document.getElementById('buildStatus');
+        const evaluationResults = document.getElementById('evaluationResults');
+
+        // Get model name
+        const modelName = document.getElementById('modelName').value;
+        if (!modelName) {
+            buildStatus.textContent = 'Please select a model';
+            buildStatus.className = 'alert alert-danger';
+            return;
+        }
+
+        // Collect custom parameters
+        const customParams = {};
+        const paramInputs = document.querySelectorAll('.param-input');
+        paramInputs.forEach(input => {
+            const paramName = input.name.replace('params.', '');
+            let value = input.value;
+
+            // Convert to appropriate type
+            if (input.type === 'number') {
+                value = input.step === '1' ? parseInt(value) : parseFloat(value);
+            } else if (typeof value === 'string' && (value.toLowerCase() === 'true' || value.toLowerCase() === 'false')) {
+                value = value.toLowerCase() === 'true';
+            }
+
+            customParams[paramName] = value;
+        });
+
+        // Prepare request data
+        const requestData = {
+            model_name: modelName,
+            custom_params: Object.keys(customParams).length > 0 ? customParams : null
+        };
+
+        buildStatus.className = 'alert hidden';
+        showSpinner();
+
+        try {
+            const response = await fetch('/api/build-model', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestData)
+            });
+
+            const result = await response.json();
+
+            if (response.ok) {
+                buildStatus.textContent = result.build_result.message;
+                buildStatus.className = 'alert alert-success';
+
+                // Display evaluation results
+                const evaluationDetails = document.getElementById('evaluationDetails');
+                const metricsContainer = document.getElementById('metricsContainer');
+
+                evaluationDetails.innerHTML = `
+                    <p><strong>Model:</strong> ${modelDefinitions[modelName]?.name || modelName}</p>
+                    <p><strong>Training completed!</strong></p>
+                `;
+
+                // Display metrics
+                metricsContainer.innerHTML = '';
+                if (result.evaluation_result) {
+                    const metrics = result.evaluation_result;
+
+                    // Add primary metrics
+                    if (metrics.rmse) {
+                        addMetricCard(metricsContainer, 'RMSE', metrics.rmse.toFixed(4));
+                    }
+                    if (metrics.mae) {
+                        addMetricCard(metricsContainer, 'MAE', metrics.mae.toFixed(4));
+                    }
+                    if (metrics.r2) {
+                        addMetricCard(metricsContainer, 'R²', metrics.r2.toFixed(4));
+                    }
+                    if (metrics.mape) {
+                        addMetricCard(metricsContainer, 'MAPE', metrics.mape.toFixed(2) + '%');
+                    }
+                }
+
+                evaluationResults.classList.remove('hidden');
+            } else {
+                buildStatus.textContent = result.detail || 'Model building failed';
+                buildStatus.className = 'alert alert-danger';
+            }
+        } catch (error) {
+            buildStatus.textContent = 'Error: ' + error.message;
+            buildStatus.className = 'alert alert-danger';
+        } finally {
+            hideSpinner();
+        }
+    }
+
+    function addMetricCard(container, title, value) {
+        const card = document.createElement('div');
+        card.className = 'metric-card';
+
+        const titleElement = document.createElement('div');
+        titleElement.className = 'metric-title';
+        titleElement.textContent = title;
+
+        const valueElement = document.createElement('div');
+        valueElement.className = 'metric-value';
+        valueElement.textContent = value;
+
+        card.appendChild(titleElement);
+        card.appendChild(valueElement);
+        container.appendChild(card);
+    }
+</script>
+{% endblock %}

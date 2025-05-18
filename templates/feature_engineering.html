@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+
+{% block title %}SemiAuto Regression - Feature Engineering{% endblock %}
+
+{% block content %}
+<div class="main-content">
+    <h1 class="section-title">Feature Engineering</h1>
+    <p>Create new features to improve model performance.</p>
+
+    <div class="card">
+        <div class="card-header">Feature Engineering Options</div>
+        <form id="featureEngineeringForm">
+            <div class="form-group">
+                <label for="useFeatureTools">Use Automated Feature Engineering</label>
+                <select id="useFeatureTools" name="use_feature_tools">
+                    <option value="false">No</option>
+                    <option value="true" selected>Yes</option>
+                </select>
+                <small>Uses FeatureTools library to generate new features automatically</small>
+            </div>
+
+            <div class="form-group">
+                <label for="useShap">Use SHAP for Feature Selection</label>
+                <select id="useShap" name="use_shap">
+                    <option value="false">No</option>
+                    <option value="true" selected>Yes</option>
+                </select>
+                <small>Uses SHAP values to identify important features</small>
+            </div>
+
+            <div class="form-group">
+                <label for="nFeatures">Number of Features to Select</label>
+                <input type="number" id="nFeatures" name="n_features" value="20" min="1" required>
+                <small>Maximum number of features to keep after selection</small>
+            </div>
+
+            <div class="form-group">
+                <button type="submit" class="btn btn-primary" onclick="runFeatureEngineering(event)">Run Feature Engineering</button>
+            </div>
+        </form>
+        <div id="spinner" class="spinner hidden"></div>
+        <div id="feStatus" class="alert hidden"></div>
+    </div>
+
+    <div class="card hidden" id="featureResults">
+        <div class="card-header">Feature Engineering Results</div>
+        <div id="featureDetails"></div>
+        <div class="form-group">
+            <a href="/model-building" class="btn btn-success">Continue to Model Building</a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+    async function runFeatureEngineering(event) {
+        event.preventDefault();
+
+        const form = document.getElementById('featureEngineeringForm');
+        const formData = new FormData(form);
+        const feStatus = document.getElementById('feStatus');
+        const featureResults = document.getElementById('featureResults');
+
+        // Convert form data to JSON
+        const jsonData = {};
+        formData.forEach((value, key) => {
+            if (key === 'use_feature_tools' || key === 'use_shap') {
+                jsonData[key] = value === 'true';
+            } else if (key === 'n_features') {
+                jsonData[key] = parseInt(value);
+            } else {
+                jsonData[key] = value;
+            }
+        });
+
+        feStatus.className = 'alert hidden';
+        showSpinner();
+
+        try {
+            const response = await fetch('/api/feature-engineering', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(jsonData)
+            });
+
+            const result = await response.json();
+
+            if (response.ok) {
+                feStatus.textContent = result.message;
+                feStatus.className = 'alert alert-success';
+
+                // Display feature results
+                const featureDetails = document.getElementById('featureDetails');
+                featureDetails.innerHTML = `
+                    <p><strong>Feature Engineering completed successfully!</strong></p>
+                    <p><strong>Original Features:</strong> ${result.original_features_count || 'N/A'}</p>
+                    <p><strong>New Features:</strong> ${result.new_features_count || 'N/A'}</p>
+                    <p><strong>Selected Features:</strong> ${result.selected_features_count || 'N/A'}</p>
+                `;
+
+                if (result.top_features && result.top_features.length > 0) {
+                    featureDetails.innerHTML += `
+                        <p><strong>Top Features:</strong></p>
+                        <ul>
+                            ${result.top_features.map(feature => `<li>${feature}</li>`).join('')}
+                        </ul>
+                    `;
+                }
+
+                featureResults.classList.remove('hidden');
+            } else {
+                feStatus.textContent = result.detail || 'Feature engineering failed';
+                feStatus.className = 'alert alert-danger';
+            }
+        } catch (error) {
+            feStatus.textContent = 'Error: ' + error.message;
+            feStatus.className = 'alert alert-danger';
+        } finally {
+            hideSpinner();
+        }
+    }
+</script>
+{% endblock %}

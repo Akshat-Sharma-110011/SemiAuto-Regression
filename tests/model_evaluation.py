@@ -3,7 +3,6 @@ Model Evaluation Module.
 
 This module evaluates the performance of trained regression models using various metrics
 and stores the results in a YAML file. It also evaluates the optimized model if available.
-API-friendly version that can be imported and used in a FastAPI application.
 """
 
 import os
@@ -13,7 +12,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Tuple, List, Optional
+from typing import Dict, Any, Tuple
 
 # Metrics imports
 from sklearn.metrics import (
@@ -28,6 +27,10 @@ from sklearn.metrics import (
 # Import custom logger
 import logging
 from src.logger import section, configure_logger  # Configure logger
+
+with open('intel.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+    dataset_name = config['dataset_name']
 
 # Configure logger
 configure_logger()
@@ -185,7 +188,7 @@ def save_metrics(metrics: Dict[str, float], dataset_name: str, filename: str = "
 
 
 def update_intel(intel: Dict[str, Any], metrics_path: str, intel_path: str = "intel.yaml",
-                 is_optimized: bool = False) -> Dict[str, Any]:
+                 is_optimized: bool = False) -> None:
     """
     Update the intel YAML file with the metrics file path.
 
@@ -194,30 +197,22 @@ def update_intel(intel: Dict[str, Any], metrics_path: str, intel_path: str = "in
         metrics_path: Path to the saved metrics file
         intel_path: Path to the intel YAML file
         is_optimized: Whether the metrics are for the optimized model
-
-    Returns:
-        Updated intel dictionary
     """
     section("Updating Intel YAML", logger)
     try:
-        # Create a new intel dictionary to avoid modifying the original
-        updated_intel = intel.copy()
-
         # Update intel dictionary with appropriate key based on model type
         if is_optimized:
-            updated_intel["optimized_performance_metrics_path"] = metrics_path
-            updated_intel["optimized_evaluation_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            intel["optimized_performance_metrics_path"] = metrics_path
+            intel["optimized_evaluation_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logger.info(f"Intel updated with optimized performance metrics path: {metrics_path}")
         else:
-            updated_intel["performance_metrics_path"] = metrics_path
-            updated_intel["evaluation_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            intel["performance_metrics_path"] = metrics_path
+            intel["evaluation_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logger.info(f"Intel updated with performance metrics path: {metrics_path}")
 
         # Save updated intel to YAML
         with open(intel_path, "w") as f:
-            yaml.dump(updated_intel, f, default_flow_style=False)
-
-        return updated_intel
+            yaml.dump(intel, f, default_flow_style=False)
 
     except Exception as e:
         logger.error(f"Failed to update intel: {e}")
@@ -245,58 +240,13 @@ def check_optimized_model_exists(dataset_name: str) -> Tuple[bool, str]:
     return exists, optimized_model_path
 
 
-def evaluate_and_save_model(model: Any, X_test: pd.DataFrame, y_test: pd.Series,
-                           dataset_name: str, is_optimized: bool = False) -> Dict[str, float]:
-    """
-    Evaluate a model and save its metrics.
-
-    Args:
-        model: Trained model object
-        X_test: Test features
-        y_test: Test target values
-        dataset_name: Name of the dataset
-        is_optimized: Whether this is an optimized model
-
-    Returns:
-        Dictionary of evaluation metrics
-    """
-    # Evaluate model
-    metrics = evaluate_model(model, X_test, y_test)
-
-    # Determine filename
-    filename = "optimized_performance.yaml" if is_optimized else "performance.yaml"
-
-    # Save metrics
-    metrics_path = save_metrics(metrics, dataset_name, filename)
-
-    # Return metrics with path
-    metrics["metrics_path"] = metrics_path
-    return metrics
-
-
-def run_evaluation(intel_path: str = "intel.yaml") -> Dict[str, Any]:
-    """
-    Run the complete model evaluation process.
-
-    Args:
-        intel_path: Path to the intel YAML file
-
-    Returns:
-        Dictionary containing evaluation results
-    """
+def main():
+    """Main function to orchestrate the model evaluation process."""
     section("Starting Model Evaluation", logger, char="*", length=60)
-    results = {
-        "success": False,
-        "standard_model": None,
-        "optimized_model": None,
-        "intel": None,
-        "error": None
-    }
 
     try:
         # Load intel
-        intel = load_intel(intel_path)
-        results["intel"] = intel
+        intel = load_intel()
 
         # Extract required paths and config
         model_path = intel["model_path"]
@@ -311,13 +261,14 @@ def run_evaluation(intel_path: str = "intel.yaml") -> Dict[str, Any]:
         # Load original model
         model = load_model(model_path)
 
-        # Evaluate and save original model
-        standard_metrics = evaluate_and_save_model(model, X_test, y_test, dataset_name, is_optimized=False)
-        results["standard_model"] = standard_metrics
+        # Evaluate original model
+        metrics = evaluate_model(model, X_test, y_test)
+
+        # Save original model metrics
+        metrics_path = save_metrics(metrics, dataset_name, "performance.yaml")
 
         # Update intel with original metrics path
-        intel = update_intel(intel, standard_metrics["metrics_path"], intel_path)
-        results["intel"] = intel
+        update_intel(intel, metrics_path)
 
         # --- Check for and evaluate the optimized model if it exists ---
         optimized_exists, optimized_model_path = check_optimized_model_exists(dataset_name)
@@ -328,102 +279,25 @@ def run_evaluation(intel_path: str = "intel.yaml") -> Dict[str, Any]:
             # Load optimized model
             optimized_model = load_model(optimized_model_path)
 
-            # Evaluate and save optimized model
-            optimized_metrics = evaluate_and_save_model(
-                optimized_model, X_test, y_test, dataset_name, is_optimized=True)
-            results["optimized_model"] = optimized_metrics
+            # Evaluate optimized model
+            optimized_metrics = evaluate_model(optimized_model, X_test, y_test)
+
+            # Save optimized model metrics
+            optimized_metrics_path = save_metrics(
+                optimized_metrics, dataset_name, "optimized_performance.yaml")
 
             # Update intel with optimized metrics path
-            intel = update_intel(intel, optimized_metrics["metrics_path"], intel_path, is_optimized=True)
-            results["intel"] = intel
+            update_intel(intel, optimized_metrics_path, is_optimized=True)
 
             logger.info("Optimized model evaluation completed successfully")
 
         section("Model Evaluation Complete", logger, char="*", length=60)
-        results["success"] = True
-        return results
 
     except Exception as e:
-        error_msg = f"Model evaluation failed: {str(e)}"
-        logger.critical(error_msg)
+        logger.critical(f"Model evaluation failed: {e}")
         section("Model Evaluation Failed", logger, level=logging.CRITICAL, char="*", length=60)
-        results["error"] = error_msg
-        return results
-
-
-def get_evaluation_summary(evaluation_results: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract a summary of the evaluation results.
-
-    Args:
-        evaluation_results: Results from run_evaluation
-
-    Returns:
-        Dictionary with summary information
-    """
-    summary = {
-        "success": evaluation_results["success"],
-        "dataset_name": evaluation_results["intel"]["dataset_name"] if evaluation_results["intel"] else None,
-        "standard_model": {},
-        "optimized_model": {},
-        "has_optimized_model": evaluation_results["optimized_model"] is not None
-    }
-
-    # Extract key metrics for standard model
-    if evaluation_results["standard_model"]:
-        metrics = evaluation_results["standard_model"]
-        summary["standard_model"] = {
-            "r2_score": metrics["r2_score"],
-            "rmse": metrics["root_mean_squared_error"],
-            "mae": metrics["mean_absolute_error"]
-        }
-
-    # Extract key metrics for optimized model if available
-    if evaluation_results["optimized_model"]:
-        metrics = evaluation_results["optimized_model"]
-        summary["optimized_model"] = {
-            "r2_score": metrics["r2_score"],
-            "rmse": metrics["root_mean_squared_error"],
-            "mae": metrics["mean_absolute_error"]
-        }
-
-        # Add improvement metrics if both models exist
-        if evaluation_results["standard_model"]:
-            std_metrics = evaluation_results["standard_model"]
-            opt_metrics = evaluation_results["optimized_model"]
-
-            # Calculate improvement percentages
-            r2_improvement = (opt_metrics["r2_score"] - std_metrics["r2_score"]) / max(abs(std_metrics["r2_score"]), 1e-10) * 100
-            rmse_improvement = (std_metrics["root_mean_squared_error"] - opt_metrics["root_mean_squared_error"]) / std_metrics["root_mean_squared_error"] * 100
-            mae_improvement = (std_metrics["mean_absolute_error"] - opt_metrics["mean_absolute_error"]) / std_metrics["mean_absolute_error"] * 100
-
-            summary["improvement"] = {
-                "r2_score": r2_improvement,
-                "rmse": rmse_improvement,
-                "mae": mae_improvement
-            }
-
-    return summary
+        raise
 
 
 if __name__ == "__main__":
-    # This block only runs when the script is executed directly
-    results = run_evaluation()
-    if results["success"]:
-        print("Model evaluation completed successfully.")
-        # Print summary of evaluation results
-        summary = get_evaluation_summary(results)
-        print(f"\nEvaluation Summary for {summary['dataset_name']}:")
-        print(f"Standard Model R² Score: {summary['standard_model']['r2_score']:.4f}")
-        print(f"Standard Model RMSE: {summary['standard_model']['rmse']:.4f}")
-
-        if summary['has_optimized_model']:
-            print(f"\nOptimized Model R² Score: {summary['optimized_model']['r2_score']:.4f}")
-            print(f"Optimized Model RMSE: {summary['optimized_model']['rmse']:.4f}")
-
-            if 'improvement' in summary:
-                print(f"\nImprovements:")
-                print(f"R² Score: {summary['improvement']['r2_score']:.2f}%")
-                print(f"RMSE: {summary['improvement']['rmse']:.2f}%")
-    else:
-        print(f"Model evaluation failed: {results['error']}")
+    main()

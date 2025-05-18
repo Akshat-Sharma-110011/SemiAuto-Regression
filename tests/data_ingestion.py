@@ -3,82 +3,48 @@ import sys
 import pandas as pd
 import numpy as np
 import yaml
-from typing import Dict, List, Tuple, Optional, Union, BinaryIO
+from typing import Dict, List, Tuple
 import logging
 from scipy import stats
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
 from sklearn.model_selection import train_test_split
-import io
-import tempfile
-import shutil
 
 # Add the parent directory to the system path to import logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-try:
-    from logger import section, configure_logger
-except ImportError:
-    # Fallback logger functions if not available
-    def section(text, logger=None, char="-", length=50):
-        message = f"\n{char * length}\n{text}\n{char * length}"
-        if logger:
-            logger.info(message)
-        else:
-            print(message)
-
-
-    def configure_logger():
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[logging.StreamHandler()]
-        )
+from logger import section, configure_logger
 
 # Constants
+EXTERNAL_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'data',
+                                 'external')
+RAW_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'data', 'raw')
+FEATURE_STORE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                 'references')
+REPORTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'reports/figures')
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RAW_DATA_DIR = os.path.join(PROJECT_DIR, 'data', 'raw')
-FEATURE_STORE_DIR = os.path.join(PROJECT_DIR, 'references')
-REPORTS_DIR = os.path.join(PROJECT_DIR, 'reports/figures')
 CORRELATION_THRESHOLD = 0.65
 SKEWNESS_THRESHOLD = 0.5
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 TEST_SIZE = 0.2
 RANDOM_STATE = 42
 OUTLIER_THRESHOLD = 1.5  # IQR multiplier for outlier detection
-ID_COLUMN_THRESHOLD = 0.9  # Threshold for unique value ratio to identify ID columns
-
 
 class DataIngestion:
     """
-    Class for handling data ingestion from uploaded files, performing initial analysis,
+    Class for handling data ingestion from CSV files, performing initial analysis,
     and creating feature store metadata.
-
-    API-friendly version that doesn't rely on command-line interaction.
     """
 
-    def __init__(self, project_dir=None):
-        """
-        Initialize the DataIngestion class
-
-        Args:
-            project_dir: Optional custom project directory path
-        """
+    def __init__(self):
+        """Initialize the DataIngestion class"""
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.info("Initializing DataIngestion component")
 
-        # Use custom project dir if specified, otherwise use default
-        self.project_dir = project_dir or PROJECT_DIR
-
-        # Update paths based on project directory
-        self.raw_data_dir = os.path.join(self.project_dir, 'data', 'raw')
-        self.feature_store_dir = os.path.join(self.project_dir, 'references')
-        self.reports_dir = os.path.join(self.project_dir, 'reports/figures')
-
         # Ensure directories exist
-        os.makedirs(self.raw_data_dir, exist_ok=True)
-        os.makedirs(self.feature_store_dir, exist_ok=True)
-        os.makedirs(self.reports_dir, exist_ok=True)
+        os.makedirs(RAW_DATA_DIR, exist_ok=True)
+        os.makedirs(FEATURE_STORE_DIR, exist_ok=True)
+        os.makedirs(REPORTS_DIR, exist_ok=True)
 
         self.df = None
         self.dataset_name = None
@@ -86,7 +52,6 @@ class DataIngestion:
             'original_cols': [],
             'numerical_cols': [],
             'categorical_cols': [],
-            'id_cols': [],  # Added ID columns list
             'skewed_cols': [],
             'normal_cols': [],
             'contains_null': [],
@@ -98,42 +63,55 @@ class DataIngestion:
             'test_size': TEST_SIZE
         }
 
-    def ingest_uploaded_file(self, file: Union[BinaryIO, str], filename: str = None) -> pd.DataFrame:
+    # Add to the DataIngestion class
+    def get_available_datasets(self, directory=EXTERNAL_DATA_DIR):
+        """List all available CSV files in the data directory"""
+        csv_files = [f for f in os.listdir(directory) if f.endswith('.csv')]
+        return csv_files
+
+    def interactive_file_selection(self, directory=EXTERNAL_DATA_DIR):
+        """Let user select from available CSV files"""
+        available_files = self.get_available_datasets(directory)
+
+        if not available_files:
+            self.logger.error(f"No CSV files found in {directory}")
+            return None
+
+        self.logger.info("Available CSV files:")
+        for i, file in enumerate(available_files):
+            self.logger.info(f"  {i + 1}. {file}")
+
+        while True:
+            try:
+                choice = input("Enter the number of the file to process: ")
+                file_idx = int(choice) - 1
+                if 0 <= file_idx < len(available_files):
+                    selected_file = os.path.join(directory, available_files[file_idx])
+                    self.logger.info(f"Selected file: {selected_file}")
+                    return selected_file
+                else:
+                    self.logger.error("Invalid selection. Please try again.")
+            except ValueError:
+                self.logger.error("Please enter a valid number.")
+
+    def ingest_csv(self, file_path: str) -> pd.DataFrame:
         """
-        Load data from an uploaded file
+        Load data from a CSV file
 
         Args:
-            file: File-like object or path to file
-            filename: Original filename (if file is a file-like object)
+            file_path: Path to the CSV file
 
         Returns:
             Pandas DataFrame containing the loaded data
         """
-        section(f"LOADING UPLOADED FILE", self.logger)
+        section(f"LOADING CSV FILE: {os.path.basename(file_path)}", self.logger)
 
         try:
-            # Determine the filename
-            if isinstance(file, str):
-                # If file is a path
-                file_path = file
-                self.dataset_name = os.path.splitext(os.path.basename(file_path))[0]
-            else:
-                # If file is a file-like object
-                if not filename:
-                    # Generate a random name if none provided
-                    self.dataset_name = f"dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                else:
-                    self.dataset_name = os.path.splitext(os.path.basename(filename))[0]
+            self.logger.info(f"Attempting to read CSV file from: {file_path}")
+            self.df = pd.read_csv(file_path)
 
-                # Read the file
-                if hasattr(file, 'read'):
-                    # If file is already a file-like object
-                    self.logger.info(f"Reading uploaded file: {self.dataset_name}")
-                    self.df = pd.read_csv(file)
-                else:
-                    self.logger.error("Invalid file object provided")
-                    raise ValueError("Invalid file object provided")
-
+            # Extract dataset name from file path
+            self.dataset_name = os.path.splitext(os.path.basename(file_path))[0]
             self.logger.info(f"Dataset name: {self.dataset_name}")
 
             # Create dataset-specific directories
@@ -147,9 +125,10 @@ class DataIngestion:
 
             # Add dataset name to feature store data
             self.feature_store_data['dataset_name'] = self.dataset_name
-            self.feature_store_data['original_file_name'] = filename if filename else self.dataset_name
+            self.feature_store_data['original_file_path'] = file_path
 
-            # Save a copy of the original file
+            # Save a copy with timestamp (for historical reference)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             raw_file_name = f"original.csv"
             raw_file_path = os.path.join(self.raw_data_dir, raw_file_name)
 
@@ -160,21 +139,8 @@ class DataIngestion:
             return self.df
 
         except Exception as e:
-            self.logger.error(f"Failed to read uploaded file: {e}")
+            self.logger.error(f"Failed to read CSV file: {e}")
             raise
-
-    def get_column_list(self) -> List[str]:
-        """
-        Get list of columns from the loaded DataFrame
-
-        Returns:
-            List of column names
-        """
-        if self.df is None:
-            self.logger.error("No data loaded. Please load data first.")
-            return []
-
-        return self.df.columns.tolist()
 
     def display_data_info(self) -> Dict:
         """
@@ -234,47 +200,6 @@ class DataIngestion:
 
         return info_dict
 
-    def identify_id_columns(self) -> List[str]:
-        """
-        Identify potential ID columns based on unique value ratio
-
-        Returns:
-            List of column names that are likely ID columns
-        """
-        section("IDENTIFYING ID COLUMNS", self.logger)
-
-        if self.df is None:
-            self.logger.error("No data loaded. Please load data first.")
-            return []
-
-        id_columns = []
-
-        # Check all columns for ID-like characteristics
-        for col in self.df.columns:
-            # Skip columns with too many nulls
-            null_percent = (self.df[col].isnull().sum() / len(self.df)) * 100
-            if null_percent > 5:
-                continue
-
-            unique_ratio = self.df[col].nunique() / len(self.df)
-
-            # Check if the column name suggests it's an ID
-            name_suggests_id = any(id_term in col.lower() for id_term in ['id', 'key', 'code', 'uuid', 'guid', 'Unnamed'])
-
-            # Criteria for ID columns:
-            # 1. High ratio of unique values (above threshold)
-            # 2. OR moderate uniqueness plus name suggests ID
-            is_id_column = (unique_ratio > ID_COLUMN_THRESHOLD) or (unique_ratio > 0.5 and name_suggests_id)
-
-            if is_id_column:
-                id_columns.append(col)
-                self.logger.info(f"  - {col}: Identified as potential ID column (unique ratio: {unique_ratio:.4f})")
-
-        self.feature_store_data['id_cols'] = id_columns
-        self.logger.info(f"Identified {len(id_columns)} potential ID columns")
-
-        return id_columns
-
     def identify_column_types(self) -> Tuple[List[str], List[str]]:
         """
         Identify numerical and categorical columns
@@ -292,15 +217,9 @@ class DataIngestion:
         self.feature_store_data['original_cols'] = self.df.columns.tolist()
         self.logger.info(f"Total columns: {len(self.feature_store_data['original_cols'])}")
 
-        # First identify ID columns
-        id_columns = self.identify_id_columns()
-
-        # Identify numerical and categorical columns, excluding ID columns
-        non_id_cols = [col for col in self.df.columns if col not in id_columns]
-        numerical_cols = [col for col in self.df[non_id_cols].select_dtypes(include=['number']).columns if
-                          col not in id_columns]
-        categorical_cols = [col for col in self.df[non_id_cols].select_dtypes(exclude=['number']).columns if
-                            col not in id_columns]
+        # Identify numerical and categorical columns
+        numerical_cols = self.df.select_dtypes(include=['number']).columns.tolist()
+        categorical_cols = self.df.select_dtypes(exclude=['number']).columns.tolist()
 
         self.feature_store_data['numerical_cols'] = numerical_cols
         self.feature_store_data['categorical_cols'] = categorical_cols
@@ -331,15 +250,7 @@ class DataIngestion:
         skewed_cols = []
         normal_cols = []
 
-        # Skip ID columns when analyzing distributions
-        id_cols = self.feature_store_data.get('id_cols', [])
-
         for col in self.feature_store_data['numerical_cols']:
-            # Skip ID columns
-            if col in id_cols:
-                self.logger.info(f"Skipping {col} for distribution analysis (identified as ID column)")
-                continue
-
             # Skip columns that are likely IDs or have too many unique values relative to row count
             unique_ratio = self.df[col].nunique() / len(self.df)
             if unique_ratio > 0.9:
@@ -397,15 +308,7 @@ class DataIngestion:
 
         columns_with_outliers = []
 
-        # Skip ID columns when detecting outliers
-        id_cols = self.feature_store_data.get('id_cols', [])
-
         for col in self.feature_store_data['numerical_cols']:
-            # Skip ID columns
-            if col in id_cols:
-                self.logger.info(f"Skipping {col} for outlier detection (identified as ID column)")
-                continue
-
             # Skip columns that are likely IDs or have too many unique values
             unique_ratio = self.df[col].nunique() / len(self.df)
             if unique_ratio > 0.9:
@@ -447,17 +350,9 @@ class DataIngestion:
             self.logger.error("No data loaded. Please load data first.")
             return {}
 
-        # Skip ID columns when analyzing correlations
-        id_cols = self.feature_store_data.get('id_cols', [])
-        numerical_cols = [col for col in self.feature_store_data['numerical_cols'] if col not in id_cols]
-
         # Calculate correlation matrix for numerical columns
         try:
-            if len(numerical_cols) < 2:
-                self.logger.warning("Not enough non-ID numerical columns to calculate correlations")
-                return {}
-
-            corr_matrix = self.df[numerical_cols].corr()
+            corr_matrix = self.df[self.feature_store_data['numerical_cols']].corr()
 
             correlated_cols = {}
 
@@ -488,15 +383,15 @@ class DataIngestion:
             self.logger.error(f"Failed to analyze correlations: {e}")
             return {}
 
-    def set_target_column(self, target_col: str) -> str:
+    def select_target_column(self, target_col: str = None) -> str:
         """
-        Set the target column for processing
+        Set or prompt for the target column
 
         Args:
-            target_col: Name of the target column
+            target_col: Name of the target column (if provided)
 
         Returns:
-            Name of the selected target column or None if invalid
+            Name of the selected target column
         """
         section("TARGET COLUMN SELECTION", self.logger)
 
@@ -504,13 +399,36 @@ class DataIngestion:
             self.logger.error("No data loaded. Please load data first.")
             return None
 
-        if target_col in self.df.columns:
+        if target_col is not None and target_col in self.df.columns:
             self.feature_store_data['target_col'] = target_col
             self.logger.info(f"Target column set to: {target_col}")
             return target_col
-        else:
-            self.logger.error(f"Target column '{target_col}' not found in dataset columns.")
-            return None
+
+        # If no target column is provided, prompt the user from command line
+        while True:
+            self.logger.info("Available columns:")
+            for i, col in enumerate(self.df.columns):
+                self.logger.info(f"  {i + 1}. {col}")
+
+            try:
+                choice = input("Enter the number or name of the target column: ")
+
+                # Check if input is a number
+                if choice.isdigit() and 1 <= int(choice) <= len(self.df.columns):
+                    target_col = self.df.columns[int(choice) - 1]
+                # Check if input is a column name
+                elif choice in self.df.columns:
+                    target_col = choice
+                else:
+                    self.logger.error("Invalid selection. Please try again.")
+                    continue
+
+                self.feature_store_data['target_col'] = target_col
+                self.logger.info(f"Target column set to: {target_col}")
+                return target_col
+
+            except Exception as e:
+                self.logger.error(f"Error selecting target column: {e}")
 
     def save_feature_store_yaml(self) -> str:
         """
@@ -556,7 +474,7 @@ class DataIngestion:
         try:
             intel_data = {
                 'dataset_name': self.dataset_name,
-                'original_file_name': self.feature_store_data.get('original_file_name', self.dataset_name),
+                'original_file_path': self.feature_store_data['original_file_path'],
                 'processed_timestamp': datetime.now().strftime(DATETIME_FORMAT),
                 'feature_store_path': os.path.join(self.feature_store_dir, 'feature_store.yaml'),
                 'train_path': os.path.join(self.raw_data_dir, 'train.csv'),
@@ -565,7 +483,7 @@ class DataIngestion:
                 'target_column': self.feature_store_data['target_col']
             }
 
-            yaml_path = os.path.join(self.project_dir, 'intel.yaml')
+            yaml_path = os.path.join(PROJECT_DIR, 'intel.yaml')
             with open(yaml_path, 'w') as f:
                 yaml.dump(intel_data, f, default_flow_style=False, sort_keys=False)
 
@@ -576,29 +494,20 @@ class DataIngestion:
             self.logger.error(f"Failed to save intel YAML: {e}")
             return None
 
-    def generate_data_profile(self) -> Dict[str, str]:
+    def generate_data_profile(self) -> None:
         """
         Generate and save basic data profile plots
-
-        Returns:
-            Dictionary with plot paths
         """
         section("GENERATING DATA PROFILE", self.logger)
 
         if self.df is None:
             self.logger.error("No data loaded. Please load data first.")
-            return {}
+            return
 
         try:
-            plot_paths = {}
-
-            # Skip ID columns when generating plots
-            id_cols = self.feature_store_data.get('id_cols', [])
-            plot_columns = [col for col in self.feature_store_data['numerical_cols'] if col not in id_cols][:10]
-
             # Plot distributions for numerical columns
             self.logger.info("Generating distribution plots for numerical columns")
-            for col in plot_columns:  # Limit to 10 columns, excluding IDs
+            for col in self.feature_store_data['numerical_cols'][:10]:  # Limit to 10 columns
                 plt.figure(figsize=(10, 4))
 
                 # Histogram with KDE
@@ -617,36 +526,28 @@ class DataIngestion:
                 plt.savefig(plot_path)
                 plt.close()
 
-                plot_paths[f'distribution_{col}'] = plot_path
                 self.logger.info(f"Saved distribution plot for {col} to {plot_path}")
 
-            # Plot correlation heatmap (excluding ID columns)
+            # Plot correlation heatmap
             self.logger.info("Generating correlation heatmap")
-            numerical_cols = [col for col in self.feature_store_data['numerical_cols'] if col not in id_cols]
+            corr_matrix = self.df[self.feature_store_data['numerical_cols']].corr()
 
-            if len(numerical_cols) > 1:  # Need at least 2 columns for correlation
-                corr_matrix = self.df[numerical_cols].corr()
+            plt.figure(figsize=(12, 10))
+            mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
+            sns.heatmap(corr_matrix, mask=mask, annot=False, cmap='coolwarm',
+                        center=0, square=True, linewidths=.5)
+            plt.title('Correlation Heatmap')
 
-                plt.figure(figsize=(12, 10))
-                mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
-                sns.heatmap(corr_matrix, mask=mask, annot=False, cmap='coolwarm',
-                            center=0, square=True, linewidths=.5)
-                plt.title('Correlation Heatmap')
+            # Save correlation heatmap
+            heatmap_path = os.path.join(self.plots_dir, 'correlation_heatmap.png')
+            plt.tight_layout()
+            plt.savefig(heatmap_path)
+            plt.close()
 
-                # Save correlation heatmap
-                heatmap_path = os.path.join(self.plots_dir, 'correlation_heatmap.png')
-                plt.tight_layout()
-                plt.savefig(heatmap_path)
-                plt.close()
-
-                plot_paths['correlation_heatmap'] = heatmap_path
-                self.logger.info(f"Saved correlation heatmap to {heatmap_path}")
-
-            return plot_paths
+            self.logger.info(f"Saved correlation heatmap to {heatmap_path}")
 
         except Exception as e:
             self.logger.error(f"Failed to generate data profile: {e}")
-            return {}
 
     def perform_train_test_split(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
@@ -709,13 +610,12 @@ class DataIngestion:
             self.logger.error(f"Failed to perform train-test split: {e}")
             return None, None
 
-    def run_ingestion_pipeline(self, file: Union[BinaryIO, str], filename: str = None, target_col: str = None) -> Dict:
+    def run_ingestion_pipeline(self, file_path: str, target_col: str = None) -> Dict:
         """
         Run the complete data ingestion pipeline
 
         Args:
-            file: File-like object or path to the CSV file
-            filename: Original filename (if file is file-like object)
+            file_path: Path to the CSV file
             target_col: Name of the target column (optional)
 
         Returns:
@@ -724,59 +624,42 @@ class DataIngestion:
         section("STARTING DATA INGESTION PIPELINE", self.logger, char='*', length=80)
 
         try:
-            # Step 1: Load the file
-            self.ingest_uploaded_file(file, filename)
+            # Step 1: Load the CSV file
+            self.ingest_csv(file_path)
 
             # Step 2: Display basic information
-            data_info = self.display_data_info()
+            self.display_data_info()
 
-            # Step 3: Identify column types (including ID columns)
-            numerical_cols, categorical_cols = self.identify_column_types()
+            # Step 3: Identify column types
+            self.identify_column_types()
 
             # Step 4: Analyze distributions
-            skewed_cols, normal_cols = self.analyze_distribution()
+            self.analyze_distribution()
 
             # Step 5: Detect outliers
-            outlier_cols = self.detect_outliers()
+            self.detect_outliers()
 
             # Step 6: Analyze correlations
-            correlated_cols = self.analyze_correlations()
+            self.analyze_correlations()
 
-            # Step 7: Set target column if provided
-            if target_col:
-                self.set_target_column(target_col)
+            # Step 7: Select target column
+            self.select_target_column(target_col)
 
             # Step 8: Perform train-test split
-            train_df, test_df = self.perform_train_test_split()
+            self.perform_train_test_split()
 
             # Step 9: Generate basic profile plots
-            plot_paths = self.generate_data_profile()
+            self.generate_data_profile()
 
             # Step 10: Save feature store YAML
-            feature_store_path = self.save_feature_store_yaml()
+            yaml_path = self.save_feature_store_yaml()
 
             # Step 11: Save intel YAML
             intel_path = self.save_intel_yaml()
 
             section("DATA INGESTION PIPELINE COMPLETED SUCCESSFULLY", self.logger, char='*', length=80)
 
-            # Create a results dictionary for API response
-            results = {
-                "dataset_name": self.dataset_name,
-                "data_shape": self.df.shape,
-                "numerical_columns": numerical_cols,
-                "categorical_columns": categorical_cols,
-                "skewed_columns": skewed_cols,
-                "columns_with_outliers": outlier_cols,
-                "feature_store_path": feature_store_path,
-                "intel_path": intel_path,
-                "plots_dir": self.plots_dir,
-                "train_path": os.path.join(self.raw_data_dir, 'train.csv'),
-                "test_path": os.path.join(self.raw_data_dir, 'test.csv'),
-                "feature_store_data": self.feature_store_data
-            }
-
-            return results
+            return self.feature_store_data
 
         except Exception as e:
             self.logger.error(f"Data ingestion pipeline failed: {e}")
@@ -784,19 +667,26 @@ class DataIngestion:
             raise
 
 
-# Function to create a DataIngestion instance
-def create_data_ingestion(project_dir=None):
-    """Factory function to create and configure a DataIngestion instance"""
+if __name__ == "__main__":
     # Configure logger
     configure_logger()
 
     # Create DataIngestion instance
-    return DataIngestion(project_dir)
+    ingestion = DataIngestion()
 
+    # Check if file path is provided as command-line argument
+    if len(sys.argv) > 1:
+        file_path = sys.argv[1]
+        target_col = sys.argv[2] if len(sys.argv) > 2 else None
+    else:
+        # If no arguments provided, offer interactive file selection
+        file_path = ingestion.interactive_file_selection()
+        target_col = None
 
-# This allows the file to be imported without automatically running anything
-if __name__ == "__main__":
-    # This code runs only when the file is executed directly
-    # but not when imported as a module
-    print("This module is designed to be imported by a FastAPI application.")
-    print("Run your FastAPI app instead of this file directly.")
+    if file_path:
+        # Run the ingestion pipeline
+        ingestion.run_ingestion_pipeline(file_path, target_col)
+    else:
+        logger = logging.getLogger("DataIngestion")
+        logger.error("No CSV file selected. Exiting.")
+        sys.exit(1)

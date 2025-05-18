@@ -1,0 +1,2784 @@
+data_ingestion_api:
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+import pandas as pd
+import logging
+import sys
+import os
+from typing import Optional
+import json
+from io import BytesIO
+import tempfile
+
+# Import the DataIngestion class
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.data.data_ingestion import create_data_ingestion
+
+# Create FastAPI app
+app = FastAPI(
+    title="Data Ingestion API",
+    description="API for data ingestion, analysis, and feature store creation",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("data_ingestion_api")
+
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {"message": "Data Ingestion API is running"}
+
+
+@app.post("/upload")
+async def upload_file(
+        file: UploadFile = File(...),
+        target_column: Optional[str] = Form(None)
+):
+    """
+    Upload a CSV file for data ingestion and analysis
+
+    Args:
+        file: The CSV file to upload
+        target_column: Optional target column name for ML tasks
+
+    Returns:
+        JSON response with ingestion results
+    """
+    logger.info(f"Received file: {file.filename}")
+
+    # Validate file format
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported")
+
+    try:
+        # Create DataIngestion instance
+        data_ingestion = create_data_ingestion()
+
+        # Create a temporary file to hold the uploaded content
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as temp_file:
+            # Save uploaded file content to temporary file
+            content = await file.read()
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+
+        try:
+            # Process the data
+            # Note: We reopen the file to ensure it's read from the beginning
+            with open(temp_file_path, 'rb') as f:
+                results = data_ingestion.run_ingestion_pipeline(f, file.filename, target_column)
+
+            # Clean up results for JSON serialization
+            # Convert any non-serializable objects to strings
+            clean_results = clean_for_json(results)
+
+            return JSONResponse(content=clean_results)
+
+        finally:
+            # Clean up the temporary file
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+
+    except Exception as e:
+        logger.error(f"Error processing file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+
+
+@app.get("/get_columns")
+async def get_columns(file: UploadFile = File(...)):
+    """
+    Get column names from a CSV file
+
+    Args:
+        file: The CSV file to analyze
+
+    Returns:
+        List of column names in the CSV file
+    """
+    logger.info(f"Getting columns from file: {file.filename}")
+
+    # Validate file format
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported")
+
+    try:
+        # Read file into pandas DataFrame
+        content = await file.read()
+        df = pd.read_csv(BytesIO(content))
+
+        # Return column names
+        return {"columns": df.columns.tolist()}
+
+    except Exception as e:
+        logger.error(f"Error reading columns: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error reading columns: {str(e)}")
+
+
+def clean_for_json(obj):
+    """Recursively convert objects to JSON-serializable types"""
+    if isinstance(obj, dict):
+        return {k: clean_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_for_json(i) for i in obj]
+    elif isinstance(obj, tuple):
+        return [clean_for_json(i) for i in obj]
+    elif isinstance(obj, (pd.DataFrame, pd.Series)):
+        return str(obj)
+    elif isinstance(obj, (int, float, str, bool, type(None))):
+        return obj
+    else:
+        return str(obj)
+
+
+# Run the application
+if __name__ == "__main__":
+    uvicorn.run("data_ingestion_api:app", host="127.0.0.1", port=8001, reload=True)
+
+data_preprocessing_api:
+from fastapi import FastAPI, HTTPException, Body
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Dict, List, Optional, Any
+import pandas as pd
+import os
+import yaml
+import logging
+from pathlib import Path
+
+# Import from your data_preprocessing.py
+# Assuming data_preprocessing.py is in the same directory
+from src.data.data_preprocessing import (
+    PreprocessingPipeline,
+    PreprocessingParameters,
+    check_for_duplicates,
+    check_for_skewness,
+    get_numerical_columns,
+    get_categorical_columns,
+    recommend_skewness_transformer,
+    load_yaml,
+    update_intel_yaml
+)
+
+app = FastAPI(
+    title="Data Preprocessing API",
+    description="API for configuring and running data preprocessing pipelines",
+    version="1.0.0",
+)
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("preprocessing-api")
+
+
+# Pydantic models for requests
+class DatasetRequest(BaseModel):
+    dataset_name: str = Field(..., description="Name of the dataset to process")
+
+
+class MissingValuesRequest(BaseModel):
+    method: str = Field(..., description="Method to handle missing values: 'mean', 'median', 'mode', or 'drop'")
+
+
+class DuplicatesRequest(BaseModel):
+    handle_duplicates: bool = Field(..., description="Whether to drop duplicate rows")
+
+
+class OutliersRequest(BaseModel):
+    method: str = Field(..., description="Method to handle outliers: 'IQR' or 'Z-Score'")
+
+
+class SkewednessRequest(BaseModel):
+    method: str = Field(..., description="Method to handle skewed data: 'yeo-johnson', 'box-cox', or 'recommended'")
+
+
+class ScalingRequest(BaseModel):
+    method: Optional[str] = Field(None,
+                                  description="Method to scale numerical features: 'standard', 'robust', 'minmax', or None")
+
+
+class EncodingRequest(BaseModel):
+    method: str = Field(..., description="Method to encode categorical features: 'onehot', 'dummies', or 'label'")
+    drop_first: bool = Field(False, description="Whether to drop first category (for onehot and dummies)")
+
+
+class PreprocessingConfigRequest(BaseModel):
+    missing_values: Optional[MissingValuesRequest] = None
+    handle_duplicates: bool = True
+    outliers: Optional[OutliersRequest] = None
+    skewedness: Optional[SkewednessRequest] = None
+    scaling: Optional[ScalingRequest] = None
+    encoding: Optional[EncodingRequest] = None
+
+
+# Session state to store preprocessing workflow information
+class PreprocessingSession:
+    def __init__(self):
+        self.dataset_name = None
+        self.train_df = None
+        self.test_df = None
+        self.intel = None
+        self.feature_store = None
+        self.target_column = None
+        self.null_columns = []
+        self.has_duplicates = False
+        self.outlier_columns = []
+        self.skewed_columns = []
+        self.categorical_columns = []
+        self.numerical_columns = []
+        self.recommended_transformers = {}
+        self.pipeline = None
+        self.pipeline_config = {}
+
+
+# Global session
+session = PreprocessingSession()
+
+
+@app.get("/")
+async def root():
+    return {"message": "Data Preprocessing API"}
+
+
+@app.post("/api/dataset", response_model=Dict)
+async def select_dataset(request: DatasetRequest):
+    try:
+        dataset_name = request.dataset_name
+
+        # Reset session
+        global session
+        session = PreprocessingSession()
+
+        # Load intel.yaml
+        intel_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'intel.yaml')
+
+        if not os.path.exists(intel_path):
+            raise HTTPException(status_code=404, detail=f"Intel file not found at {intel_path}")
+
+        intel = load_yaml(intel_path)
+        session.intel = intel
+        session.dataset_name = dataset_name
+
+        # Get paths from intel
+        feature_store_path = intel.get('feature_store_path')
+        train_path = intel.get('train_path')
+        test_path = intel.get('test_path')
+        target_column = intel.get('target_column')
+        session.target_column = target_column
+
+        if not all([feature_store_path, train_path, test_path, target_column]):
+            raise HTTPException(status_code=400, detail="Required paths or target column not found in intel.yaml")
+
+        # Load feature store
+        feature_store = load_yaml(feature_store_path)
+        session.feature_store = feature_store
+
+        # Load data
+        train_df = pd.read_csv(train_path)
+        test_df = pd.read_csv(test_path)
+        session.train_df = train_df
+        session.test_df = test_df
+
+        # Get columns information
+        session.null_columns = [col for col in feature_store.get('contains_null', []) if col != target_column]
+        session.outlier_columns = [col for col in feature_store.get('contains_outliers', []) if col != target_column]
+        session.skewed_columns = [col for col in feature_store.get('skewed_cols', []) if col != target_column]
+        session.categorical_columns = [col for col in feature_store.get('categorical_cols', []) if col != target_column]
+
+        # Detect duplicates
+        session.has_duplicates = check_for_duplicates(train_df)
+
+        # Auto-detect columns if not in feature store
+        if not session.categorical_columns:
+            session.categorical_columns = get_categorical_columns(train_df, exclude=[target_column])
+
+        if not session.skewed_columns:
+            session.numerical_columns = get_numerical_columns(train_df, exclude=[target_column])
+            skewness_dict = check_for_skewness(train_df, session.numerical_columns)
+            session.skewed_columns = list(skewness_dict.keys())
+
+        # Get recommended transformers for skewed columns
+        for col in session.skewed_columns:
+            recommended = recommend_skewness_transformer(train_df, col)
+            session.recommended_transformers[col] = recommended
+
+        # Initialize pipeline config
+        session.pipeline_config = {
+            'dataset_name': dataset_name,
+            'target_col': target_column,
+            'feature_store': feature_store
+        }
+
+        # Initialize pipeline
+        session.pipeline = PreprocessingPipeline(session.pipeline_config, PreprocessingParameters())
+
+        # Return dataset information
+        return {
+            "dataset_name": dataset_name,
+            "train_shape": train_df.shape,
+            "test_shape": test_df.shape,
+            "target_column": target_column,
+            "null_columns": session.null_columns,
+            "has_duplicates": session.has_duplicates,
+            "outlier_columns": session.outlier_columns,
+            "skewed_columns": session.skewed_columns,
+            "categorical_columns": session.categorical_columns,
+            "numerical_columns": session.numerical_columns,
+            "recommended_transformers": session.recommended_transformers
+        }
+
+    except Exception as e:
+        logger.error(f"Error selecting dataset: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/missing-values", response_model=Dict)
+async def handle_missing_values(request: MissingValuesRequest):
+    if not session.pipeline:
+        raise HTTPException(status_code=400, detail="No active preprocessing session. Select a dataset first.")
+
+    if not session.null_columns:
+        return {"message": "No columns with missing values detected"}
+
+    try:
+        method = request.method
+        if method not in ['mean', 'median', 'mode', 'drop']:
+            raise HTTPException(status_code=400, detail="Invalid method for handling missing values")
+
+        session.pipeline.handle_missing_values(method=method, columns=session.null_columns)
+
+        return {
+            "message": f"Missing values will be handled using {method} method",
+            "columns": session.null_columns,
+            "method": method
+        }
+
+    except Exception as e:
+        logger.error(f"Error handling missing values: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/duplicates", response_model=Dict)
+async def handle_duplicates(request: DuplicatesRequest):
+    if not session.pipeline:
+        raise HTTPException(status_code=400, detail="No active preprocessing session. Select a dataset first.")
+
+    try:
+        handle_duplicates = request.handle_duplicates
+        session.handle_duplicates = handle_duplicates
+
+        return {
+            "message": f"Duplicates will be {'dropped' if handle_duplicates else 'kept'}",
+            "handle_duplicates": handle_duplicates
+        }
+
+    except Exception as e:
+        logger.error(f"Error handling duplicates: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/outliers", response_model=Dict)
+async def handle_outliers(request: OutliersRequest):
+    if not session.pipeline:
+        raise HTTPException(status_code=400, detail="No active preprocessing session. Select a dataset first.")
+
+    if not session.outlier_columns:
+        return {"message": "No columns with outliers detected"}
+
+    try:
+        method = request.method
+        if method not in ['IQR', 'Z-Score']:
+            raise HTTPException(status_code=400, detail="Invalid method for handling outliers")
+
+        session.pipeline.handle_outliers(method=method, columns=session.outlier_columns)
+
+        return {
+            "message": f"Outliers will be handled using {method} method",
+            "columns": session.outlier_columns,
+            "method": method
+        }
+
+    except Exception as e:
+        logger.error(f"Error handling outliers: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/skewedness", response_model=Dict)
+async def handle_skewedness(request: SkewednessRequest):
+    if not session.pipeline:
+        raise HTTPException(status_code=400, detail="No active preprocessing session. Select a dataset first.")
+
+    if not session.skewed_columns:
+        return {"message": "No columns with skewed distributions detected"}
+
+    try:
+        method = request.method
+
+        if method == 'recommended':
+            # Count recommendations
+            counts = {'yeo-johnson': 0, 'box-cox': 0}
+            for col, transformer in session.recommended_transformers.items():
+                counts[transformer] += 1
+
+            if counts['box-cox'] > counts['yeo-johnson']:
+                method = 'box-cox'
+            else:
+                method = 'yeo-johnson'
+
+        if method not in ['yeo-johnson', 'box-cox']:
+            raise HTTPException(status_code=400, detail="Invalid method for handling skewed data")
+
+        session.pipeline.handle_skewed_data(method=method, columns=session.skewed_columns)
+
+        return {
+            "message": f"Skewed data will be handled using {method} transformation",
+            "columns": session.skewed_columns,
+            "method": method
+        }
+
+    except Exception as e:
+        logger.error(f"Error handling skewed data: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/scaling", response_model=Dict)
+async def scale_numerical_features(request: ScalingRequest):
+    if not session.pipeline:
+        raise HTTPException(status_code=400, detail="No active preprocessing session. Select a dataset first.")
+
+    try:
+        method = request.method
+
+        if not method:
+            return {"message": "Numerical features will not be scaled"}
+
+        if method not in ['standard', 'robust', 'minmax']:
+            raise HTTPException(status_code=400, detail="Invalid method for scaling numerical features")
+
+        if not session.numerical_columns:
+            session.numerical_columns = get_numerical_columns(session.train_df, exclude=[session.target_column])
+
+        if not session.numerical_columns:
+            return {"message": "No numerical columns detected for scaling"}
+
+        session.pipeline.scale_numerical_features(method=method, columns=session.numerical_columns)
+
+        return {
+            "message": f"Numerical features will be scaled using {method} scaler",
+            "columns": session.numerical_columns,
+            "method": method
+        }
+
+    except Exception as e:
+        logger.error(f"Error scaling numerical features: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/encoding", response_model=Dict)
+async def encode_categorical_features(request: EncodingRequest):
+    if not session.pipeline:
+        raise HTTPException(status_code=400, detail="No active preprocessing session. Select a dataset first.")
+
+    if not session.categorical_columns:
+        return {"message": "No categorical columns detected"}
+
+    try:
+        method = request.method
+        drop_first = request.drop_first
+
+        if method not in ['onehot', 'dummies', 'label']:
+            raise HTTPException(status_code=400, detail="Invalid method for encoding categorical features")
+
+        session.pipeline.encode_categorical_features(method=method, columns=session.categorical_columns,
+                                                     drop_first=drop_first)
+
+        return {
+            "message": f"Categorical features will be encoded using {method} encoder",
+            "columns": session.categorical_columns,
+            "method": method,
+            "drop_first": drop_first
+        }
+
+    except Exception as e:
+        logger.error(f"Error encoding categorical features: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/process", response_model=Dict)
+async def process_data():
+    if not session.pipeline:
+        raise HTTPException(status_code=400, detail="No active preprocessing session. Select a dataset first.")
+
+    try:
+        # Prepare directories
+        dataset_name = session.dataset_name
+        interim_dir = Path(f"data/interim/data_{dataset_name}")
+        interim_dir.mkdir(parents=True, exist_ok=True)
+
+        pipeline_dir = Path(f"model/pipelines/preprocessing_{dataset_name}")
+        pipeline_dir.mkdir(parents=True, exist_ok=True)
+
+        train_preprocessed_path = interim_dir / "train_preprocessed.csv"
+        test_preprocessed_path = interim_dir / "test_preprocessed.csv"
+        pipeline_path = pipeline_dir / "preprocessing.pkl"
+
+        # Build preprocessing config
+        preprocessing_config = {}
+
+        if hasattr(session.pipeline, 'missing_handler') and session.pipeline.missing_handler:
+            preprocessing_config['missing_values'] = {
+                'method': session.pipeline.missing_handler.method,
+                'columns': session.pipeline.missing_handler.columns
+            }
+
+        if hasattr(session, 'handle_duplicates'):
+            preprocessing_config['handle_duplicates'] = session.handle_duplicates
+
+        if hasattr(session.pipeline, 'outlier_handler') and session.pipeline.outlier_handler:
+            preprocessing_config['outliers'] = {
+                'method': session.pipeline.outlier_handler.method,
+                'columns': session.pipeline.outlier_handler.columns
+            }
+
+        if hasattr(session.pipeline, 'skewed_handler') and session.pipeline.skewed_handler:
+            preprocessing_config['skewed_data'] = {
+                'method': session.pipeline.skewed_handler.method,
+                'columns': session.pipeline.skewed_handler.columns
+            }
+
+        if hasattr(session.pipeline, 'numerical_scaler') and session.pipeline.numerical_scaler:
+            preprocessing_config['numerical_scaling'] = {
+                'method': session.pipeline.numerical_scaler.method,
+                'columns': session.pipeline.numerical_scaler.columns
+            }
+
+        if hasattr(session.pipeline, 'categorical_encoder') and session.pipeline.categorical_encoder:
+            preprocessing_config['categorical_encoding'] = {
+                'method': session.pipeline.categorical_encoder.method,
+                'columns': session.pipeline.categorical_encoder.columns,
+                'drop_first': session.pipeline.categorical_encoder.drop_first
+            }
+
+        # Fit pipeline
+        logger.info("Fitting preprocessing pipeline")
+        session.pipeline.fit(session.train_df)
+
+        # Transform data
+        logger.info("Transforming data with preprocessing pipeline")
+        handle_duplicates = preprocessing_config.get('handle_duplicates', True)
+        train_preprocessed = session.pipeline.transform(session.train_df, handle_duplicates=handle_duplicates)
+        test_preprocessed = session.pipeline.transform(session.test_df, handle_duplicates=False)
+
+        # Move target column to the end if present
+        target_column = session.target_column
+        if target_column in train_preprocessed.columns:
+            cols = [col for col in train_preprocessed.columns if col != target_column] + [target_column]
+            train_preprocessed = train_preprocessed[cols]
+            test_preprocessed = test_preprocessed[cols]
+
+        # Save processed data
+        train_preprocessed.to_csv(train_preprocessed_path, index=False)
+        test_preprocessed.to_csv(test_preprocessed_path, index=False)
+
+        # Save pipeline
+        session.pipeline.save(str(pipeline_path))
+
+        # Update intel.yaml
+        updates = {
+            'train_preprocessed_path': str(train_preprocessed_path),
+            'test_preprocessed_path': str(test_preprocessed_path),
+            'preprocessing_pipeline_path': str(pipeline_path),
+            'preprocessing_config': preprocessing_config
+        }
+
+        intel_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'intel.yaml')
+        update_intel_yaml(intel_path, updates)
+
+        return {
+            "message": "Data preprocessing completed successfully",
+            "train_shape": train_preprocessed.shape,
+            "test_shape": test_preprocessed.shape,
+            "train_preprocessed_path": str(train_preprocessed_path),
+            "test_preprocessed_path": str(test_preprocessed_path),
+            "preprocessing_pipeline_path": str(pipeline_path),
+            "preprocessing_config": preprocessing_config
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing data: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/preprocess-all", response_model=Dict)
+async def process_with_config(config: PreprocessingConfigRequest):
+    """Process the data with a single configuration request"""
+    if not session.dataset_name:
+        raise HTTPException(status_code=400, detail="No dataset selected. Select a dataset first.")
+
+    try:
+        # Handle missing values
+        if config.missing_values and session.null_columns:
+            session.pipeline.handle_missing_values(
+                method=config.missing_values.method,
+                columns=session.null_columns
+            )
+
+        # Set handle duplicates flag
+        session.handle_duplicates = config.handle_duplicates
+
+        # Handle outliers
+        if config.outliers and session.outlier_columns:
+            session.pipeline.handle_outliers(
+                method=config.outliers.method,
+                columns=session.outlier_columns
+            )
+
+        # Handle skewed data
+        if config.skewedness and session.skewed_columns:
+            method = config.skewedness.method
+
+            if method == 'recommended':
+                counts = {'yeo-johnson': 0, 'box-cox': 0}
+                for col, transformer in session.recommended_transformers.items():
+                    counts[transformer] += 1
+
+                if counts['box-cox'] > counts['yeo-johnson']:
+                    method = 'box-cox'
+                else:
+                    method = 'yeo-johnson'
+
+            session.pipeline.handle_skewed_data(
+                method=method,
+                columns=session.skewed_columns
+            )
+
+        # Scale numerical features
+        if config.scaling and config.scaling.method:
+            if not session.numerical_columns:
+                session.numerical_columns = get_numerical_columns(session.train_df, exclude=[session.target_column])
+
+            if session.numerical_columns:
+                session.pipeline.scale_numerical_features(
+                    method=config.scaling.method,
+                    columns=session.numerical_columns
+                )
+
+        # Encode categorical features
+        if config.encoding and session.categorical_columns:
+            session.pipeline.encode_categorical_features(
+                method=config.encoding.method,
+                columns=session.categorical_columns,
+                drop_first=config.encoding.drop_first
+            )
+
+        # Now process the data
+        return await process_data()
+
+    except Exception as e:
+        logger.error(f"Error in preprocess-all: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8002)
+
+feature_engineering_api:
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+FastAPI application for feature engineering.
+This module provides REST API endpoints to trigger and manage feature engineering processes.
+"""
+
+import os
+import sys
+import logging
+from typing import Dict, Optional
+from pathlib import Path
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Depends
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+import uvicorn
+
+# Add parent directory to path for importing feature engineering module
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+
+# Import the feature engineering module
+from src.features.feature_engineering import FeatureEngineer, run_feature_engineering
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logger = logging.getLogger("FastAPI - Feature Engineering")
+
+# Define the FastAPI app
+app = FastAPI(
+    title="Feature Engineering API",
+    description="API for running and managing feature engineering processes",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
+
+# Define Pydantic models for request/response validation
+class FeatureEngineeringRequest(BaseModel):
+    config_path: str = Field(default="intel.yaml", description="Path to the config file")
+    use_feature_tools: bool = Field(default=False, description="Whether to use FeatureTools for feature generation")
+    use_shap: bool = Field(default=False, description="Whether to use SHAP for feature selection")
+    n_features: int = Field(default=20, description="Number of features to select if using SHAP")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "config_path": "intel.yaml",
+                "use_feature_tools": True,
+                "use_shap": True,
+                "n_features": 20
+            }
+        }
+
+
+class FeatureEngineeringResponse(BaseModel):
+    status: str
+    message: str
+    metadata: Optional[Dict] = None
+
+
+# Define the background task for long-running processes
+def run_feature_engineering_task(
+        config_path: str,
+        use_feature_tools: bool,
+        use_shap: bool,
+        n_features: int
+):
+    try:
+        logger.info(f"Starting feature engineering task with config={config_path}, "
+                    f"use_feature_tools={use_feature_tools}, use_shap={use_shap}, n_features={n_features}")
+
+        result = run_feature_engineering(
+            config_path=config_path,
+            use_feature_tools=use_feature_tools,
+            use_shap=use_shap,
+            n_features=n_features
+        )
+
+        logger.info(f"Feature engineering task completed with status: {result['status']}")
+        return result
+    except Exception as e:
+        logger.error(f"Error in feature engineering task: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Feature engineering task failed: {str(e)}"
+        }
+
+
+# Define the API endpoints
+@app.post("/feature-engineering/run", response_model=FeatureEngineeringResponse)
+async def trigger_feature_engineering(
+        request: FeatureEngineeringRequest,
+        background_tasks: BackgroundTasks
+):
+    """
+    Trigger a feature engineering process with the specified parameters.
+
+    This endpoint runs the feature engineering process asynchronously in the background.
+    """
+    try:
+        # Verify that the config file exists
+        config_path = Path(request.config_path)
+        if not config_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Config file not found: {request.config_path}"
+            )
+
+        # Run the feature engineering process
+        result = run_feature_engineering(
+            config_path=request.config_path,
+            use_feature_tools=request.use_feature_tools,
+            use_shap=request.use_shap,
+            n_features=request.n_features
+        )
+
+        return result
+    except Exception as e:
+        logger.error(f"Error triggering feature engineering: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error triggering feature engineering: {str(e)}"
+        )
+
+
+@app.get("/feature-engineering/importance", response_model=dict)
+async def get_feature_importance(config_path: str = Query(default="intel.yaml")):
+    """
+    Get feature importance data if SHAP selection was used.
+    """
+    try:
+        engineer = FeatureEngineer(config_path=config_path)
+        return engineer.get_feature_importance()
+    except Exception as e:
+        logger.error(f"Error retrieving feature importance: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving feature importance: {str(e)}"
+        )
+
+
+@app.get("/feature-engineering/generated-features", response_model=dict)
+async def get_generated_features(config_path: str = Query(default="intel.yaml")):
+    """
+    Get generated features if FeatureTools was used.
+    """
+    try:
+        engineer = FeatureEngineer(config_path=config_path)
+        return engineer.get_generated_features()
+    except Exception as e:
+        logger.error(f"Error retrieving generated features: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving generated features: {str(e)}"
+        )
+
+
+@app.get("/health")
+async def health_check():
+    """
+    Simple health check endpoint.
+    """
+    return {"status": "healthy"}
+
+
+# Add any additional endpoints as needed
+
+if __name__ == "__main__":
+    # This block is for running the FastAPI app directly
+    try:
+        # Get parameters from command line arguments if provided
+        import argparse
+
+        parser = argparse.ArgumentParser(description='Run FastAPI Feature Engineering service')
+        parser.add_argument('--host', default='0.0.0.0', help='Host to bind the server to')
+        parser.add_argument('--port', type=int, default=8000, help='Port to bind the server to')
+        parser.add_argument('--reload', action='store_true', help='Enable auto-reload for development')
+        args = parser.parse_args()
+
+        # Run the FastAPI app
+        logger.info(f"Starting FastAPI server on {args.host}:{args.port}")
+        uvicorn.run(
+            "feature_engineering_api:app",
+            host='127.0.0.1',
+            port=8003,
+            reload=args.reload
+        )
+
+    except Exception as e:
+        logger.critical(f"Failed to start FastAPI server: {str(e)}")
+        sys.exit(1)
+
+model_building_api:
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+FastAPI application for the AutoML regression model building pipeline.
+This exposes the model_building functionality through REST API endpoints.
+"""
+
+from fastapi import FastAPI, HTTPException, Body, Query
+from fastapi.responses import JSONResponse
+from typing import Dict, Any, List, Optional
+import uvicorn
+import yaml
+from pydantic import BaseModel, Field
+import pandas as pd
+import traceback
+
+# Import the API-friendly model builder
+from src.model.model_building import ModelBuilder
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="AutoML Regression Pipeline API",
+    description="API for building regression models using the AutoML pipeline",
+    version="1.0.0"
+)
+
+
+# Pydantic models for request validation
+class ModelParams(BaseModel):
+    """Parameter schema for model customization"""
+    model_params: Dict[str, Any] = Field(
+        default={},
+        description="Dictionary of model parameters to customize"
+    )
+
+
+class ModelBuildRequest(BaseModel):
+    """Request schema for building a model"""
+    model_name: str = Field(..., description="Name of the regression model to build")
+    custom_params: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional custom parameters for the model"
+    )
+
+
+# Initialize the model builder
+try:
+    model_builder = ModelBuilder()
+except Exception as e:
+    print(f"Error initializing ModelBuilder: {e}")
+    # We'll initialize it later when needed
+
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {"message": "Welcome to the AutoML Regression Pipeline API"}
+
+
+@app.get("/models", response_model=Dict[str, Dict])
+async def get_available_models():
+    """
+    Get all available regression models with their descriptions and default parameters
+    """
+    try:
+        # Initialize ModelBuilder if needed
+        global model_builder
+        if 'model_builder' not in globals() or model_builder is None:
+            model_builder = ModelBuilder()
+
+        # Get available models
+        models = model_builder.get_available_models()
+        return models
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve models: {str(e)}\n{error_detail}"
+        )
+
+
+@app.post("/build-model", response_model=Dict[str, Any])
+async def build_model(request: ModelBuildRequest):
+    """
+    Build and train a regression model
+
+    - **model_name**: Name of the model to build (e.g., "Random Forest", "XGBoost")
+    - **custom_params**: Optional custom parameters to override defaults
+    """
+    try:
+        # Initialize ModelBuilder if needed
+        global model_builder
+        if 'model_builder' not in globals() or model_builder is None:
+            model_builder = ModelBuilder()
+
+        # Process the model request
+        result = model_builder.process_model_request(
+            model_name=request.model_name,
+            custom_params=request.custom_params
+        )
+
+        return result
+    except ValueError as e:
+        # For known validation errors like invalid model name
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # For unexpected errors
+        error_detail = traceback.format_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to build model: {str(e)}\n{error_detail}"
+        )
+
+
+@app.get("/dataset-info")
+async def get_dataset_info():
+    """
+    Get information about the current dataset being used
+    """
+    try:
+        # Initialize ModelBuilder if needed
+        global model_builder
+        if 'model_builder' not in globals() or model_builder is None:
+            model_builder = ModelBuilder()
+
+        # Get dataset information from the intel file
+        return {
+            "dataset_name": model_builder.dataset_name,
+            "target_column": model_builder.target_column,
+            "train_data_path": model_builder.train_data_path,
+            "test_data_path": model_builder.test_data_path
+        }
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve dataset info: {str(e)}\n{error_detail}"
+        )
+
+
+if __name__ == "__main__":
+    # Run the FastAPI app with uvicorn
+    uvicorn.run("model_building_api:app", host="127.0.0.1", port=8004, reload=True)
+
+model_evaluation_api:
+from fastapi import FastAPI, HTTPException, Query, Path
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Dict, Any, Optional, List
+import uvicorn
+import os
+import yaml
+
+# Import our model evaluation module functions
+from src.model.model_evaluation import (
+    run_evaluation,
+    get_evaluation_summary,
+    load_model,
+    load_test_data,
+    evaluate_model,
+    load_intel
+)
+
+app = FastAPI(
+    title="Model Evaluation API",
+    description="API for evaluating regression models and viewing their performance metrics",
+    version="0.1.0"
+)
+
+
+# Define response models
+class ModelMetrics(BaseModel):
+    r2_score: float
+    mean_squared_error: float
+    root_mean_squared_error: float
+    mean_absolute_error: float
+    mean_absolute_percentage_error: float
+    explained_variance_score: float
+    max_error: float
+
+
+class ModelComparison(BaseModel):
+    r2_score: float
+    rmse: float
+    mae: float
+
+
+class EvaluationSummary(BaseModel):
+    success: bool
+    dataset_name: str
+    standard_model: ModelComparison
+    optimized_model: Optional[ModelComparison]
+    has_optimized_model: bool
+    improvement: Optional[Dict[str, float]]
+
+
+@app.get("/", tags=["Root"])
+async def root():
+    """Root endpoint provides basic information about the API."""
+    return {
+        "message": "Model Evaluation API is running",
+        "available_endpoints": [
+            "/evaluate-model/",
+            "/metrics/",
+            "/metrics/summary/",
+            "/metrics/comparison/",
+            "/datasets/"
+        ]
+    }
+
+
+@app.post("/evaluate-model/", tags=["Evaluation"], response_model=Dict[str, Any])
+async def evaluate_model_endpoint(intel_path: str = Query("intel.yaml", description="Path to the intel YAML file")):
+    """
+    Run a complete model evaluation process and return the results.
+    This will evaluate both the standard and optimized models (if available).
+    """
+    try:
+        # Check if intel file exists before proceeding
+        if not os.path.exists(intel_path):
+            raise HTTPException(status_code=404, detail=f"Intel file not found at path: {intel_path}")
+
+        # Run the evaluation
+        results = run_evaluation(intel_path)
+
+        if not results["success"]:
+            raise HTTPException(status_code=500, detail=f"Evaluation failed: {results.get('error', 'Unknown error')}")
+
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during evaluation: {str(e)}")
+
+
+@app.get("/metrics/", tags=["Metrics"], response_model=Dict[str, Any])
+async def get_metrics(
+        dataset_name: str = Query(..., description="Name of the dataset"),
+        model_type: str = Query("standard", description="Model type: 'standard' or 'optimized'")
+):
+    """
+    Get detailed metrics for a specific model and dataset.
+    """
+    try:
+        # Determine file path based on model type
+        filename = "optimized_performance.yaml" if model_type == "optimized" else "performance.yaml"
+        metrics_path = os.path.join("reports", "metrics", f"performance_{dataset_name}", filename)
+
+        # Check if metrics file exists
+        if not os.path.exists(metrics_path):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Metrics for {model_type} model on {dataset_name} not found"
+            )
+
+        # Load metrics from file
+        with open(metrics_path, "r") as f:
+            metrics = yaml.safe_load(f)
+
+        return metrics
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Error retrieving metrics: {str(e)}")
+
+
+@app.get("/metrics/summary/", tags=["Metrics"], response_model=EvaluationSummary)
+async def get_metrics_summary(intel_path: str = Query("intel.yaml", description="Path to the intel YAML file")):
+    """
+    Get a summary of the model evaluation results including key metrics and improvements.
+    """
+    try:
+        # Check if intel file exists
+        if not os.path.exists(intel_path):
+            raise HTTPException(status_code=404, detail=f"Intel file not found at path: {intel_path}")
+
+        # Load intel to get paths
+        intel = load_intel(intel_path)
+
+        # Run evaluation to get latest results
+        results = run_evaluation(intel_path)
+
+        if not results["success"]:
+            raise HTTPException(status_code=500, detail=f"Evaluation failed: {results.get('error', 'Unknown error')}")
+
+        # Get summary
+        summary = get_evaluation_summary(results)
+        return summary
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Error generating summary: {str(e)}")
+
+
+@app.get("/metrics/comparison/", tags=["Metrics"], response_model=Dict[str, Any])
+async def compare_models(dataset_name: str = Query(..., description="Name of the dataset")):
+    """
+    Compare standard and optimized models for a given dataset.
+    """
+    try:
+        # Define paths for both model metrics
+        standard_path = os.path.join("reports", "metrics", f"performance_{dataset_name}", "performance.yaml")
+        optimized_path = os.path.join("reports", "metrics", f"performance_{dataset_name}", "optimized_performance.yaml")
+
+        # Check if standard metrics exist
+        if not os.path.exists(standard_path):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Standard model metrics for {dataset_name} not found"
+            )
+
+        # Load standard metrics
+        with open(standard_path, "r") as f:
+            standard_metrics = yaml.safe_load(f)
+
+        # Prepare response
+        comparison = {
+            "dataset_name": dataset_name,
+            "standard_model": {
+                "r2_score": standard_metrics["r2_score"],
+                "rmse": standard_metrics["root_mean_squared_error"],
+                "mae": standard_metrics["mean_absolute_error"]
+            },
+            "has_optimized_model": os.path.exists(optimized_path)
+        }
+
+        # Add optimized model metrics if available
+        if comparison["has_optimized_model"]:
+            with open(optimized_path, "r") as f:
+                optimized_metrics = yaml.safe_load(f)
+
+            comparison["optimized_model"] = {
+                "r2_score": optimized_metrics["r2_score"],
+                "rmse": optimized_metrics["root_mean_squared_error"],
+                "mae": optimized_metrics["mean_absolute_error"]
+            }
+
+            # Calculate improvements
+            std = comparison["standard_model"]
+            opt = comparison["optimized_model"]
+
+            r2_improvement = (opt["r2_score"] - std["r2_score"]) / max(abs(std["r2_score"]), 1e-10) * 100
+            rmse_improvement = (std["rmse"] - opt["rmse"]) / std["rmse"] * 100
+            mae_improvement = (std["mae"] - opt["mae"]) / std["mae"] * 100
+
+            comparison["improvement"] = {
+                "r2_score": r2_improvement,
+                "rmse": rmse_improvement,
+                "mae": mae_improvement
+            }
+
+        return comparison
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Error comparing models: {str(e)}")
+
+
+@app.get("/datasets/", tags=["Datasets"], response_model=List[str])
+async def list_datasets():
+    """
+    List all available datasets with evaluated models.
+    """
+    try:
+        metrics_dir = os.path.join("reports", "metrics")
+
+        # Check if metrics directory exists
+        if not os.path.exists(metrics_dir):
+            return []
+
+        # Get all dataset folders
+        datasets = []
+        for item in os.listdir(metrics_dir):
+            if item.startswith("performance_") and os.path.isdir(os.path.join(metrics_dir, item)):
+                dataset_name = item.replace("performance_", "")
+                datasets.append(dataset_name)
+
+        return datasets
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing datasets: {str(e)}")
+
+
+@app.get("/models/{dataset_name}", tags=["Models"], response_model=Dict[str, Any])
+async def get_model_details(
+        dataset_name: str = Path(..., description="Name of the dataset"),
+        evaluate: bool = Query(False, description="Re-evaluate models before returning details")
+):
+    """
+    Get details about models available for a specific dataset.
+    """
+    try:
+        # Define paths
+        model_dir = os.path.join("model", f"model_{dataset_name}")
+        standard_model_path = os.path.join(model_dir, "model.pkl")
+        optimized_model_path = os.path.join(model_dir, "optimized_model.pkl")
+
+        # Check if standard model exists
+        if not os.path.exists(standard_model_path):
+            raise HTTPException(status_code=404, detail=f"No models found for dataset: {dataset_name}")
+
+        # Get intel path
+        intel_path = "intel.yaml"
+        if not os.path.exists(intel_path):
+            raise HTTPException(status_code=404, detail=f"Intel file not found at path: {intel_path}")
+
+        # Re-evaluate if requested
+        if evaluate:
+            results = run_evaluation(intel_path)
+            if not results["success"]:
+                raise HTTPException(status_code=500,
+                                    detail=f"Evaluation failed: {results.get('error', 'Unknown error')}")
+
+        # Prepare response
+        model_details = {
+            "dataset_name": dataset_name,
+            "standard_model": {
+                "path": standard_model_path,
+                "exists": os.path.exists(standard_model_path),
+                "size": os.path.getsize(standard_model_path) if os.path.exists(standard_model_path) else 0
+            },
+            "optimized_model": {
+                "path": optimized_model_path,
+                "exists": os.path.exists(optimized_model_path),
+                "size": os.path.getsize(optimized_model_path) if os.path.exists(optimized_model_path) else 0
+            }
+        }
+
+        # Add metrics paths if available
+        metrics_dir = os.path.join("reports", "metrics", f"performance_{dataset_name}")
+        standard_metrics_path = os.path.join(metrics_dir, "performance.yaml")
+        optimized_metrics_path = os.path.join(metrics_dir, "optimized_performance.yaml")
+
+        if os.path.exists(standard_metrics_path):
+            model_details["standard_model"]["metrics_path"] = standard_metrics_path
+            with open(standard_metrics_path, "r") as f:
+                metrics = yaml.safe_load(f)
+                model_details["standard_model"]["evaluation_timestamp"] = metrics.get("evaluation_timestamp")
+
+        if os.path.exists(optimized_metrics_path):
+            model_details["optimized_model"]["metrics_path"] = optimized_metrics_path
+            with open(optimized_metrics_path, "r") as f:
+                metrics = yaml.safe_load(f)
+                model_details["optimized_model"]["evaluation_timestamp"] = metrics.get("evaluation_timestamp")
+
+        return model_details
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Error retrieving model details: {str(e)}")
+
+
+if __name__ == "__main__":
+    uvicorn.run("model_evaluation_api:app", host="127.0.0.1", port=8005, reload=True)
+
+model_optimization_api:
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
+from enum import Enum
+from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field
+import uvicorn
+import sys
+import os
+import traceback
+from pathlib import Path
+
+# Add parent directory to path to import the model_optimizer module
+sys.path.append(str(Path(__file__).parent.parent))
+
+# Import the original module
+from src.model.model_optimization import ModelOptimizer, get_available_metrics, get_optimization_methods
+from src.logger import section, configure_logger
+
+# This function will be used to monkey patch the original ModelOptimizer class
+def safe_suggest_param(trial, param_name, param_values):
+    """Safely suggest parameter values for trials, handling log scale issues"""
+    if isinstance(param_values, list):
+        if all(isinstance(val, (int, float)) for val in param_values) and len(param_values) > 1:
+            min_val = min(param_values)
+            max_val = max(param_values)
+
+            # Check if log scale is appropriate
+            use_log = max_val / max(1e-5, min_val) > 100
+
+            # Critical fix: If using log scale, ensure min_val is positive
+            if use_log and min_val <= 0:
+                min_val = 1e-5  # Use a small positive value for log scale
+
+            if all(isinstance(val, int) for val in param_values):
+                return trial.suggest_int(param_name, min_val, max_val, log=use_log)
+            else:
+                return trial.suggest_float(param_name, min_val, max_val, log=use_log)
+        else:
+            return trial.suggest_categorical(param_name, param_values)
+    else:
+        return trial.suggest_categorical(param_name, param_values)
+
+
+# Monkey patch the original ModelOptimizer to fix the log distribution issue
+original_objective = ModelOptimizer._objective
+
+
+def patched_objective(self, trial, model_class, param_space, metric_name, maximize):
+    params = {}
+    for param_name, param_values in param_space.items():
+        if param_name == "hidden_layer_sizes":
+            params[param_name] = trial.suggest_categorical(param_name, param_values)
+        else:
+            params[param_name] = safe_suggest_param(trial, param_name, param_values)
+
+    model = model_class(**params)
+    model.fit(self.X_train, self.y_train)
+
+    y_pred = model.predict(self.X_test)
+    metric_value = self._calculate_metric(self.y_test, y_pred, metric_name)
+
+    self.logger.info(
+        f"Trial {trial.number} - Params: {params}, "
+        f"Metric ({metric_name}): {metric_value:.4f}"
+    )
+
+    return metric_value if maximize else -metric_value
+
+
+# Apply the monkey patch
+ModelOptimizer._objective = patched_objective
+
+# Create the FastAPI application
+app = FastAPI(
+    title="Model Optimization API",
+    description="API for optimizing machine learning models using GridSearchCV or Optuna",
+    version="1.0.0"
+)
+
+
+class OptimizationMethod(str, Enum):
+    GRID_SEARCH = "1"
+    OPTUNA = "2"
+
+
+class OptimizationMetric(str, Enum):
+    RMSE = "1"
+    MSE = "2"
+    MAE = "3"
+    MAPE = "4"
+    R2 = "5"
+    EXPLAINED_VARIANCE = "6"
+    MAX_ERROR = "7"
+
+
+class OptimizationRequest(BaseModel):
+    optimize: bool = Field(True, description="Whether to run optimization or not")
+    method: OptimizationMethod = Field(OptimizationMethod.GRID_SEARCH, description="Optimization method to use")
+    n_trials: int = Field(50, description="Number of trials for Optuna (ignored for Grid Search)")
+    metric: OptimizationMetric = Field(OptimizationMetric.RMSE, description="Metric to optimize")
+
+
+class OptimizationResponse(BaseModel):
+    status: str
+    message: str
+    best_params: Optional[Dict[str, Any]] = None
+    model_path: Optional[str] = None
+    metrics: Optional[Dict[str, float]] = None
+
+
+@app.get("/")
+async def root():
+    return {"message": "Welcome to the Model Optimization API"}
+
+
+@app.get("/available-metrics", response_model=Dict[str, List])
+async def get_metrics():
+    metrics = get_available_metrics()
+    formatted_metrics = {}
+
+    for key, (metric_name, maximize, description) in metrics.items():
+        formatted_metrics[key] = [metric_name, "maximize" if maximize else "minimize", description]
+
+    return formatted_metrics
+
+
+@app.get("/optimization-methods", response_model=Dict[str, str])
+async def get_methods():
+    return get_optimization_methods()
+
+
+@app.post("/optimize", response_model=OptimizationResponse)
+async def run_optimization(request: OptimizationRequest):
+    try:
+        # We'll use the original optimize_model function since we've patched the ModelOptimizer class
+        from src.model.model_optimization import optimize_model
+
+        result = optimize_model(
+            optimize=request.optimize,
+            method=request.method.value,
+            n_trials=request.n_trials,
+            metric=request.metric.value,
+            config_overrides=None
+        )
+
+        return result
+    except Exception as e:
+        import traceback
+        error_details = f"{str(e)}\n{traceback.format_exc()}"
+        print(error_details)  # Print to logs for debugging
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/models", response_model=Dict[str, str])
+async def get_available_models():
+    try:
+        # Create a temporary ModelOptimizer instance to get the model list
+        optimizer = ModelOptimizer()
+        models = {}
+
+        for i, (name, _) in enumerate(optimizer.models.items(), 1):
+            models[str(i)] = name
+
+        return models
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    uvicorn.run("model_optimization_api:app", host="127.0.0.1", port=8007, reload=True)
+
+projectflow_reports_api:
+import os
+import yaml
+import shutil
+from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
+from pydantic import BaseModel
+from typing import Optional
+
+# Import ProjectFlowReport class from the module
+from src.visualization.projectflow_report import ProjectFlowReport
+
+app = FastAPI(
+    title="ProjectFlow Report Generator",
+    description="API to generate regression model reports using ProjectFlowReport",
+    version="0.1.0"
+)
+
+# Create necessary directories
+os.makedirs("temp", exist_ok=True)
+os.makedirs("reports/pdf", exist_ok=True)
+
+
+class ReportRequest(BaseModel):
+    use_default_intel: bool = False
+
+
+@app.post("/generate-report/")
+async def generate_report(use_default_intel: bool = False,
+                          intel_file: Optional[UploadFile] = File(None)):
+    """
+    Generate a regression model report.
+
+    - Use default intel file: set use_default_intel=true
+    - Upload custom intel file: upload an intel.yaml file
+
+    Returns the generated PDF report for download.
+    """
+
+    # Check if user wants to use default or has uploaded a file
+    if not use_default_intel and not intel_file:
+        raise HTTPException(status_code=400, detail="Either set use_default_intel=true or upload an intel.yaml file")
+
+    # Determine the path for intel.yaml
+    if use_default_intel:
+        intel_yaml_path = "intel.yaml"
+        if not os.path.exists(intel_yaml_path):
+            raise HTTPException(status_code=404, detail="Default intel.yaml not found in the project directory")
+    else:
+        # Save the uploaded file
+        temp_path = f"temp/intel_{os.urandom(8).hex()}.yaml"
+        with open(temp_path, "wb") as f:
+            content = await intel_file.read()
+            f.write(content)
+        intel_yaml_path = temp_path
+
+    try:
+        # Check if the yaml is valid
+        with open(intel_yaml_path, "r") as f:
+            yaml_content = yaml.safe_load(f)
+
+        # Get dataset_name from yaml
+        dataset_name = yaml_content.get("dataset_name", "unnamed")
+
+        # Create and generate the report
+        report_generator = ProjectFlowReport(intel_yaml_path)
+        report_generator.generate_report()
+
+        # Get the path of the generated report
+        report_path = f"reports/pdf/projectflow_report_{dataset_name}.pdf"
+
+        if not os.path.exists(report_path):
+            raise HTTPException(status_code=500, detail="Report generation failed")
+
+        # Clean up temp file
+        def remove_temp_file():
+            if not use_default_intel:
+                os.remove(intel_yaml_path)
+
+        # Return the PDF file
+        return FileResponse(
+            path=report_path,
+            filename=f"projectflow_report_{dataset_name}.pdf",
+            media_type="application/pdf",
+            background=BackgroundTask(remove_temp_file)
+        )
+
+    except Exception as e:
+        # Clean up temp file in case of error
+        if not use_default_intel and os.path.exists(intel_yaml_path):
+            os.remove(intel_yaml_path)
+        raise HTTPException(status_code=500, detail=f"Error generating report: {str(e)}")
+
+
+@app.get("/")
+async def root():
+    """Welcome endpoint that provides basic API information."""
+    return {
+        "message": "Welcome to ProjectFlow Report Generator API",
+        "usage": "POST to /generate-report/ with an intel.yaml file or use_default_intel=true"
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8008)
+
+
+
+These are all the standalone test api's for my regression based automl but now i want to combine them into a single app.py fastapi that does everything with some few changes, the user/I will send their requests on swagger ui so don't need to make html or css files.
+this whole process will be done in 8 parts,
+data_ingestion will ask user to upload the dataset and give the target column name. it will then do all of it's processing internally.
+then next request will be off data_preprcessing step, it get the request of handle missing values, handle duplicates, outliers, skewedness, saling and encoding. everything else will be provided internally by intel.yaml. this intel.yaml will be updated internally everytime and is desgined to provide paths and constants like dataset_name to the backend code.
+the next request will be of feature engineering, the request would be of featuretools, shap and n_features and everything else would be provided internally.
+the next request would be off model_building step, it will get the user the available models and the user can build any model to it with his custom params or default params. everything else will be handled internally.
+the next request will be of model_evaulation, this will give out the performance of the model or optimized_model, this is branched out that it will run twice automatically right after model_building and model_optimization, right now user won't have any optimized_model as model_optimization is the next step which is also completely skippable,
+the next request would be of model_optimization, this will get the request of optimize, true or false, if true then it will proceed with the model_optimization, if false then it will just skip the model_optimization. also which method (gridsearchcv or optuna), n_trails and the metric.
+the next request would be off model_evaluation again, if the model_optimization is true and it will also give out the performance metrics.
+the next request will be of projectflow_reports, this will use all the internal files inside to generate a pdf report file which will automatically run after the final model_evaluation and it will give out a downloadable report pdf, all the models and pipelines.
+
+REMEMBER: This is the only thing the app.py want to get as user request inputs and intel.yaml will definatley update after each and every step so you do not have to ask for the paths or constants.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, BackgroundTasks
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List
+import uvicorn
+import pandas as pd
+import logging
+import sys
+import os
+import json
+import yaml
+from io import BytesIO
+import tempfile
+from pathlib import Path
+from enum import Enum
+
+# Import all required components
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.data.data_ingestion import create_data_ingestion
+from src.data.data_preprocessing import (
+    PreprocessingPipeline, PreprocessingParameters,
+    check_for_duplicates, check_for_skewness,
+    get_numerical_columns, get_categorical_columns,
+    recommend_skewness_transformer, load_yaml, update_intel_yaml
+)
+from src.features.feature_engineering import FeatureEngineer, run_feature_engineering
+from src.model.model_building import ModelBuilder
+from src.model.model_evaluation import run_evaluation, get_evaluation_summary
+from src.model.model_optimization import ModelOptimizer, optimize_model
+from src.visualization.projectflow_report import ProjectFlowReport
+
+app = FastAPI(
+    title="AutoML Regression Pipeline",
+    description="End-to-end regression pipeline with automated machine learning capabilities",
+    version="1.0.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("automl_api")
+
+
+# region Request Models
+
+
+class DataIngestionRequest(BaseModel):
+    target_column: str
+
+
+class PreprocessingRequest(BaseModel):
+    handle_missing_values: Optional[str] = None  # Method for handling missing values
+    handle_duplicates: bool = True
+    handle_outliers: Optional[str] = None
+    handle_skewed: Optional[str] = None
+    scaling: Optional[str] = None
+    encoding: Optional[str] = None
+    encoding_drop_first: bool = False
+
+
+class FeatureEngineeringRequest(BaseModel):
+    use_feature_tools: bool = False
+    use_shap_selection: bool = False
+    n_features_selected: Optional[int] = None
+
+
+class ModelBuildRequest(BaseModel):
+    model_name: str
+    custom_params: Optional[Dict[str, Any]] = None
+
+
+class OptimizationMethod(str, Enum):
+    GRID_SEARCH = "grid"
+    OPTUNA = "optuna"
+
+
+class OptimizationRequest(BaseModel):
+    optimize: bool = True
+    method: OptimizationMethod = OptimizationMethod.GRID_SEARCH
+    n_trials: int = 50
+    metric: str = "rmse"
+
+
+# endregion
+
+# region Utility Functions
+def clean_for_json(obj):
+    if isinstance(obj, dict):
+        return {k: clean_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [clean_for_json(i) for i in obj]
+    elif isinstance(obj, (pd.DataFrame, pd.Series)):
+        return obj.to_dict()
+    return obj
+
+
+def load_intel():
+    try:
+        with open("intel.yaml", "r") as f:
+            return yaml.safe_load(f)
+    except FileNotFoundError:
+        # Create default intel file if it doesn't exist
+        default_intel = {"dataset_name": None, "target_column": None}
+        with open("intel.yaml", "w") as f:
+            yaml.dump(default_intel, f)
+        return default_intel
+
+
+def update_intel(updates):
+    intel = load_intel()
+
+    # Recursive update to handle nested dictionaries
+    def recursive_update(d, u):
+        for k, v in u.items():
+            if isinstance(v, dict) and k in d and isinstance(d[k], dict):
+                recursive_update(d[k], v)
+            else:
+                d[k] = v
+        return d
+
+    intel = recursive_update(intel, updates)
+    with open("intel.yaml", "w") as f:
+        yaml.dump(intel, f)
+    return intel
+
+
+# Preprocessing Session class to manage preprocessing configuration
+class PreprocessingSession:
+    def __init__(self):
+        self.dataset_name = None
+        # Create preprocessing parameters from the request
+        params = PreprocessingParameters()
+        # Load the current intel as config
+        config = load_intel()
+        # Initialize pipeline with config and params
+        self.pipeline = PreprocessingPipeline(config=config, params=params)
+        self.handle_duplicates = False
+        self.pipeline_config = {}
+
+    def get_config(self):
+        """Convert the preprocessing pipeline configuration to a dictionary"""
+        config = {
+            "handle_duplicates": self.handle_duplicates,
+        }
+
+        # Add other configurations from the pipeline
+        if hasattr(self.pipeline, "missing_values_config"):
+            config["missing_values"] = self.pipeline.missing_values_config
+
+        if hasattr(self.pipeline, "outliers_config"):
+            config["outliers"] = self.pipeline.outliers_config
+
+        if hasattr(self.pipeline, "skewed_data_config"):
+            config["skewed_data"] = self.pipeline.skewed_data_config
+
+        if hasattr(self.pipeline, "scaling_config"):
+            config["numerical_scaling"] = self.pipeline.scaling_config
+
+        if hasattr(self.pipeline, "encoding_config"):
+            config["categorical_encoding"] = self.pipeline.encoding_config
+
+        return config
+
+
+# endregion
+
+# region Endpoints
+@app.post("/data-ingestion/upload")
+async def upload_dataset(
+        file: UploadFile = File(...),
+        target_column: str = Form(...)
+):
+    """
+    Upload a dataset and perform data ingestion
+    """
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(400, "Only CSV files supported")
+
+    try:
+        data_ingestion = create_data_ingestion()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+            temp_path = temp_file.name
+
+        with open(temp_path, 'rb') as f:
+            results = data_ingestion.run_ingestion_pipeline(
+                f, file.filename, target_column
+            )
+
+        os.unlink(temp_path)
+        update_intel({
+            "dataset_name": results["dataset_name"],
+            "target_column": target_column,
+            "original_file_name": file.filename,
+            "train_path": results["train_path"],
+            "test_path": results["test_path"],
+            "feature_store_path": results["feature_store_path"]
+        })
+        return JSONResponse(clean_for_json(results))
+
+    except Exception as e:
+        logger.error(f"Data ingestion failed: {str(e)}")
+        raise HTTPException(500, f"Data ingestion error: {str(e)}")
+
+
+@app.post("/preprocessing/configure")
+async def configure_preprocessing(request: PreprocessingRequest):
+    """
+    Configure and run the preprocessing pipeline
+    """
+    try:
+        intel = load_intel()
+
+        # Make sure feature store path exists
+        if "feature_store_path" not in intel:
+            raise HTTPException(400, "Feature store path not found. Please run data ingestion first.")
+
+        # Load feature store
+        feature_store = load_yaml(intel["feature_store_path"])
+
+        # Create preprocessing parameters from the request
+        preprocessing_params = PreprocessingParameters(
+            handle_missing=request.handle_missing_values,
+            handle_outliers=request.handle_outliers,
+            handle_skewed=request.handle_skewed,
+            scaling_method=request.scaling,
+            encoding_method=request.encoding,
+            encoding_drop_first=request.encoding_drop_first
+        )
+
+        # Update intel with feature store information
+        intel["feature_store"] = feature_store
+
+        # Initialize preprocessing session with proper configuration
+        session = PreprocessingSession()
+        session.dataset_name = intel["dataset_name"]
+
+        # Update pipeline with newly created parameters
+        session.pipeline.params = preprocessing_params
+        session.pipeline.config = intel
+
+        # Configure preprocessing steps
+        if request.handle_missing_values and "contains_null" in feature_store:
+            session.pipeline.handle_missing_values(
+                method=request.handle_missing_values,
+                columns=feature_store["contains_null"]
+            )
+
+        session.handle_duplicates = request.handle_duplicates
+
+        if request.handle_outliers and "contains_outliers" in feature_store:
+            session.pipeline.handle_outliers(
+                method=request.handle_outliers,
+                columns=feature_store["contains_outliers"]
+            )
+
+        if request.handle_skewed and "skewed_cols" in feature_store:
+            session.pipeline.handle_skewed_data(
+                method=request.handle_skewed,
+                columns=feature_store["skewed_cols"]
+            )
+
+        if request.scaling and "numerical_cols" in feature_store:
+            session.pipeline.scale_numerical_features(
+                method=request.scaling,
+                columns=feature_store["numerical_cols"]
+            )
+
+        if request.encoding and "categorical_cols" in feature_store:
+            session.pipeline.encode_categorical_features(
+                method=request.encoding,
+                columns=feature_store["categorical_cols"],
+                drop_first=request.encoding_drop_first
+            )
+
+        # Get configuration and update intel
+        pipeline_config = session.get_config()
+        current_timestamp = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        preprocessing_updates = {
+            "preprocessing_config": pipeline_config,
+            "processed_timestamp": current_timestamp,
+        }
+
+        # Run the preprocessing pipeline and get paths
+        preprocessing_results = session.pipeline.run_preprocessing_pipeline(
+            train_path=intel["train_path"],
+            test_path=intel["test_path"],
+            target_column=intel["target_column"],
+            dataset_name=intel["dataset_name"]
+        )
+
+        # Update with results
+        preprocessing_updates.update(preprocessing_results)
+        update_intel(preprocessing_updates)
+
+        return {
+            "message": "Preprocessing configured and executed successfully",
+            "config": pipeline_config,
+            "timestamp": current_timestamp
+        }
+
+    except Exception as e:
+        logger.error(f"Preprocessing error: {str(e)}")
+        raise HTTPException(500, f"Preprocessing error: {str(e)}")
+
+
+@app.post("/feature-engineering/run")
+async def feature_engineering(request: FeatureEngineeringRequest):
+    """
+    Run feature engineering with specified configuration
+    """
+    try:
+        # Run feature engineering with the provided configuration
+        result = run_feature_engineering(
+            use_feature_tools=request.use_feature_tools,
+            use_shap_selection=request.use_shap_selection,
+            n_features_selected=request.n_features_selected
+        )
+
+        # Update intel.yaml with feature engineering configuration
+        config = {
+            "feature_engineering_config": {
+                "use_feature_tools": request.use_feature_tools,
+                "use_shap_selection": request.use_shap_selection,
+                "n_features_selected": request.n_features_selected,
+                "timestamp": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+        }
+        update_intel(config)
+
+        return {
+            "message": "Feature engineering completed successfully",
+            "selected_features": result.get("selected_features", []),
+            "n_features": result.get("n_features", 0)
+        }
+    except Exception as e:
+        logger.error(f"Feature engineering failed: {str(e)}")
+        raise HTTPException(500, f"Feature engineering error: {str(e)}")
+
+
+@app.post("/model-building/train")
+async def build_model(request: ModelBuildRequest):
+    """
+    Build and train a model with the specified configuration
+    """
+    try:
+        model_builder = ModelBuilder()
+        result = model_builder.build_model(
+            model_name=request.model_name,
+            custom_params=request.custom_params
+        )
+
+        # Update intel with model information
+        update_intel({
+            "model_name": request.model_name,
+            "model_path": result["model_path"],
+            "model_timestamp": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+
+        # Run evaluation automatically after model building
+        try:
+            evaluation_result = run_evaluation()
+            update_intel({
+                "performance_metrics_path": evaluation_result["metrics_path"],
+                "evaluation_timestamp": evaluation_result["timestamp"]
+            })
+        except Exception as eval_error:
+            logger.error(f"Automatic model evaluation failed: {str(eval_error)}")
+
+        return {
+            "message": f"Model {request.model_name} trained successfully",
+            "model_path": result["model_path"],
+            "training_time": result.get("training_time", 0)
+        }
+    except Exception as e:
+        logger.error(f"Model training failed: {str(e)}")
+        raise HTTPException(500, f"Model training error: {str(e)}")
+
+
+@app.post("/model-optimization/run")
+async def run_optimization(request: OptimizationRequest):
+    """
+    Optimize the model using the specified method
+    """
+    try:
+        if not request.optimize:
+            return {"message": "Model optimization skipped as requested"}
+
+        optimizer = ModelOptimizer()
+        result = optimizer.optimize_model(
+            method=request.method.value,
+            n_trials=request.n_trials,
+            metric=request.metric
+        )
+
+        # Update intel with optimized model information
+        update_intel({
+            "optimized_model_path": result["model_path"],
+            "optimization_timestamp": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "best_params_path": result.get("best_params_path")
+        })
+
+        # Run evaluation automatically after optimization
+        try:
+            optimized_evaluation_result = run_evaluation(use_optimized=True)
+            update_intel({
+                "optimized_performance_metrics_path": optimized_evaluation_result["metrics_path"],
+                "optimized_evaluation_timestamp": optimized_evaluation_result["timestamp"]
+            })
+        except Exception as eval_error:
+            logger.error(f"Automatic optimized model evaluation failed: {str(eval_error)}")
+
+        return {
+            "message": "Model optimization completed successfully",
+            "optimized_model_path": result["model_path"],
+            "best_params": result.get("best_params", {}),
+            "optimization_time": result.get("optimization_time", 0)
+        }
+    except Exception as e:
+        logger.error(f"Optimization failed: {str(e)}")
+        raise HTTPException(500, f"Optimization error: {str(e)}")
+
+
+@app.get("/model-evaluation/results")
+async def get_model_evaluation():
+    """
+    Get the evaluation results for the model
+    """
+    try:
+        intel = load_intel()
+
+        # Check if evaluation has been performed
+        if "performance_metrics_path" not in intel:
+            raise HTTPException(400, "Model evaluation has not been performed yet")
+
+        # Get evaluation results
+        evaluation_results = get_evaluation_summary(
+            metrics_path=intel["performance_metrics_path"]
+        )
+
+        # Check if optimized evaluation exists
+        optimized_results = None
+        if "optimized_performance_metrics_path" in intel:
+            optimized_results = get_evaluation_summary(
+                metrics_path=intel["optimized_performance_metrics_path"]
+            )
+
+        return {
+            "model_name": intel.get("model_name", "Unknown"),
+            "base_model_metrics": evaluation_results,
+            "optimized_model_metrics": optimized_results,
+            "evaluation_timestamp": intel.get("evaluation_timestamp"),
+            "optimized_evaluation_timestamp": intel.get("optimized_evaluation_timestamp")
+        }
+    except Exception as e:
+        logger.error(f"Getting evaluation results failed: {str(e)}")
+        raise HTTPException(500, f"Evaluation results error: {str(e)}")
+
+
+@app.get("/report/generate")
+async def generate_report():
+    """
+    Generate a PDF report for the project
+    """
+    try:
+        report = ProjectFlowReport()
+        report_path = report.generate_report()
+
+        if not os.path.exists(report_path):
+            raise HTTPException(500, "Report generation failed")
+
+        intel = load_intel()
+        filename = f"report_{intel.get('dataset_name', 'project')}.pdf"
+
+        return FileResponse(
+            path=report_path,
+            filename=filename,
+            media_type="application/pdf"
+        )
+    except Exception as e:
+        logger.error(f"Report generation failed: {str(e)}")
+        raise HTTPException(500, f"Report error: {str(e)}")
+
+
+# endregion
+
+if __name__ == "__main__":
+    # Create intel.yaml if it doesn't exist
+    if not os.path.exists("intel.yaml"):
+        with open("intel.yaml", "w") as f:
+            yaml.dump({}, f)
+
+    uvicorn.run("app:app", host="127.0.0.1", port=8010, reload=True)
+
+
+
+
+
+
+
+
+
+
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, BackgroundTasks
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+from io import BytesIO
+import pandas as pd
+import os
+import yaml
+import tempfile
+from pathlib import Path
+import uvicorn
+import shutil
+import sys
+
+# Import internal modules
+from src.data.data_ingestion import create_data_ingestion
+from src.data.data_preprocessing import (
+    PreprocessingPipeline, PreprocessingParameters, check_for_duplicates,
+    check_for_skewness, get_numerical_columns, get_categorical_columns,
+    recommend_skewness_transformer, load_yaml, update_intel_yaml
+)
+from src.features.feature_engineering import run_feature_engineering
+from src.model.model_building import ModelBuilder
+from src.model.model_evaluation import run_evaluation, get_evaluation_summary
+from src.model.model_optimization import optimize_model
+from src.visualization.projectflow_report import ProjectFlowReport
+
+app = FastAPI(title="Unified AutoML Regression API", version="1.0")
+
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+class PreprocessingConfig(BaseModel):
+    missing_values: Optional[str] = None
+    handle_duplicates: bool = True
+    outliers: Optional[str] = None
+    skewedness: Optional[str] = None
+    scaling: Optional[str] = None
+    encoding: Optional[str] = None
+    drop_first: Optional[bool] = False
+
+class FeatureEngineeringRequest(BaseModel):
+    use_feature_tools: bool = False
+    use_shap: bool = False
+    n_features: int = 20
+
+class ModelBuildRequest(BaseModel):
+    model_name: str
+    custom_params: Optional[Dict[str, Any]] = None
+
+class OptimizationRequest(BaseModel):
+    optimize: bool = True
+    method: str = "1"  # "1"=GridSearch, "2"=Optuna
+    n_trials: int = 50
+    metric: str = "1"  # e.g. "1"=RMSE
+
+@app.post("/upload")
+async def upload_dataset(file: UploadFile = File(...), target_column: str = Form(...)):
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as temp:
+        contents = await file.read()
+        temp.write(contents)
+        temp.flush()
+        path = temp.name
+
+    df = pd.read_csv(path)
+    columns = df.columns.tolist()
+
+    ingestion = create_data_ingestion()
+    with open(path, "rb") as f:
+        ingestion.run_ingestion_pipeline(f, file.filename, target_column)
+
+    os.unlink(path)
+    return {"message": "Data ingestion completed", "columns": columns}
+
+@app.post("/preprocess")
+def preprocess_data(config: PreprocessingConfig):
+    intel = load_yaml("intel.yaml")
+    train_df = pd.read_csv(intel['train_path'])
+    test_df = pd.read_csv(intel['test_path'])
+    feature_store = load_yaml(intel['feature_store_path'])
+
+    numerical = feature_store.get('numerical_cols', [])
+    categorical = feature_store.get('categorical_cols', [])
+    nulls = [col for col in feature_store.get('contains_null', []) if col != intel['target_column']]
+    outliers = [col for col in feature_store.get('contains_outliers', []) if col != intel['target_column']]
+    skewed = [col for col in feature_store.get('skewed_cols', []) if col != intel['target_column']]
+
+    pipeline = PreprocessingPipeline({
+        'dataset_name': intel['dataset_name'],
+        'target_col': intel['target_column'],
+        'feature_store': feature_store
+    }, PreprocessingParameters())
+
+    if config.missing_values and nulls:
+        pipeline.handle_missing_values(config.missing_values, nulls)
+    if config.outliers and outliers:
+        pipeline.handle_outliers(config.outliers, outliers)
+    if config.skewedness and skewed:
+        pipeline.handle_skewed_data(config.skewedness, skewed)
+    if config.scaling and numerical:
+        pipeline.scale_numerical_features(config.scaling, numerical)
+    if config.encoding and categorical:
+        pipeline.encode_categorical_features(config.encoding, categorical, config.drop_first)
+
+    pipeline.fit(train_df)
+    train_p = pipeline.transform(train_df, handle_duplicates=config.handle_duplicates)
+    test_p = pipeline.transform(test_df, handle_duplicates=False)
+
+    interim_dir = Path(f"data/interim/data_{intel['dataset_name']}")
+    interim_dir.mkdir(parents=True, exist_ok=True)
+    train_path = interim_dir / "train_preprocessed.csv"
+    test_path = interim_dir / "test_preprocessed.csv"
+
+    pipeline_dir = Path(f"model/pipelines/preprocessing_{intel['dataset_name']}")
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
+    pipeline_path = pipeline_dir / "preprocessing.pkl"
+
+    train_p.to_csv(train_path, index=False)
+    test_p.to_csv(test_path, index=False)
+    pipeline.save(str(pipeline_path))
+
+    update_intel_yaml("intel.yaml", {
+        "train_preprocessed_path": str(train_path),
+        "test_preprocessed_path": str(test_path),
+        "preprocessing_pipeline_path": str(pipeline_path)
+    })
+
+    return {"message": "Preprocessing completed"}
+
+@app.post("/feature-engineering")
+def feature_engineering(request: FeatureEngineeringRequest):
+    result = run_feature_engineering(
+        config_path="intel.yaml",
+        use_feature_tools=request.use_feature_tools,
+        use_shap=request.use_shap,
+        n_features=request.n_features
+    )
+    return result
+
+@app.get("/available-models")
+def get_model_list():
+    builder = ModelBuilder()
+    return builder.get_available_models()
+
+@app.post("/build-model")
+def build_model(request: ModelBuildRequest):
+    builder = ModelBuilder()
+    result = builder.process_model_request(
+        model_name=request.model_name,
+        custom_params=request.custom_params
+    )
+    evaluation = run_evaluation("intel.yaml")
+    return {"build_result": result, "evaluation_result": evaluation}
+
+@app.post("/optimize")
+def optimize(request: OptimizationRequest):
+    if not request.optimize:
+        return {"message": "Optimization skipped."}
+
+    result = optimize_model(
+        optimize=request.optimize,
+        method=request.method,
+        n_trials=request.n_trials,
+        metric=request.metric,
+        config_overrides=None
+    )
+
+    evaluation = run_evaluation("intel.yaml")
+    return {"optimization_result": result, "evaluation_result": evaluation}
+
+@app.get("/generate-report")
+def generate_report():
+    report_generator = ProjectFlowReport("intel.yaml")
+    report_generator.generate_report()
+    intel = load_yaml("intel.yaml")
+    dataset_name = intel.get("dataset_name", "unnamed")
+    report_path = f"reports/pdf/projectflow_report_{dataset_name}.pdf"
+
+    if not os.path.exists(report_path):
+        raise HTTPException(status_code=500, detail="Report generation failed")
+
+    return FileResponse(
+        path=report_path,
+        filename=os.path.basename(report_path),
+        media_type="application/pdf"
+    )
+
+if __name__ == "__main__":
+    uvicorn.run("app:app", host="127.0.0.1", port=8010, reload=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Make visually appealing corresponding html and css files for this fastapi app.py. make sure it has visually appealing UI, please make sure that you will make every html files and css file correctly and fully
+
+this is how the project structure looks like:
+app.py
+templates/
+  |> index.html
+  |> data_upload.html
+  |> preprocessing.html
+  |> feature_engineering.html
+  |> model_building.html
+  |> optimization.html
+  |> results.html
+  |> error.html
+static/
+  |> css/
+     |> main.css
+     |> dashboard.css
+
+Make sure that you will make every html and css files, each and every file mentaioned in the project structure
+
+app.py:
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, BackgroundTasks, Request
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+from io import BytesIO
+import pandas as pd
+import os
+import yaml
+import tempfile
+from pathlib import Path
+import uvicorn
+import shutil
+import sys
+
+# Import internal modules
+from src.data.data_ingestion import create_data_ingestion
+from src.data.data_preprocessing import (
+    PreprocessingPipeline, PreprocessingParameters, check_for_duplicates,
+    check_for_skewness, get_numerical_columns, get_categorical_columns,
+    recommend_skewness_transformer, load_yaml, update_intel_yaml
+)
+from src.features.feature_engineering import run_feature_engineering
+from src.model.model_building import ModelBuilder
+from src.model.model_evaluation import run_evaluation, get_evaluation_summary
+from src.model.model_optimization import optimize_model
+from src.visualization.projectflow_report import ProjectFlowReport
+
+app = FastAPI(title="SemiAuto Regression", version="1.0")
+
+# Set up static files and templates
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+class PreprocessingConfig(BaseModel):
+    missing_values: Optional[str] = None
+    handle_duplicates: bool = True
+    outliers: Optional[str] = None
+    skewedness: Optional[str] = None
+    scaling: Optional[str] = None
+    encoding: Optional[str] = None
+    drop_first: Optional[bool] = False
+
+class FeatureEngineeringRequest(BaseModel):
+    use_feature_tools: bool = False
+    use_shap: bool = False
+    n_features: int = 20
+
+class ModelBuildRequest(BaseModel):
+    model_name: str
+    custom_params: Optional[Dict[str, Any]] = None
+
+class OptimizationRequest(BaseModel):
+    optimize: bool = True
+    method: str = "1"  # "1"=GridSearch, "2"=Optuna
+    n_trials: int = 50
+    metric: str = "1"  # e.g. "1"=RMSE
+
+# Route to main page
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+# Route to data upload page
+@app.get("/data-upload", response_class=HTMLResponse)
+async def data_upload_page(request: Request):
+    return templates.TemplateResponse("data_upload.html", {"request": request})
+
+# Route to preprocessing page
+@app.get("/preprocessing", response_class=HTMLResponse)
+async def preprocessing_page(request: Request):
+    # Try to load intel.yaml to check if data has been uploaded
+    try:
+        intel = load_yaml("intel.yaml")
+        # Check if we have columns information to display
+        feature_store = {}
+        if 'feature_store_path' in intel and os.path.exists(intel['feature_store_path']):
+            feature_store = load_yaml(intel['feature_store_path'])
+
+        return templates.TemplateResponse("preprocessing.html", {
+            "request": request,
+            "dataset_name": intel.get('dataset_name', ''),
+            "target_column": intel.get('target_column', ''),
+            "numerical_cols": feature_store.get('numerical_cols', []),
+            "categorical_cols": feature_store.get('categorical_cols', []),
+            "nulls": feature_store.get('contains_null', []),
+            "outliers": feature_store.get('contains_outliers', []),
+            "skewed": feature_store.get('skewed_cols', [])
+        })
+    except:
+        # If not, redirect to upload page
+        return templates.TemplateResponse("error.html", {
+            "request": request,
+            "error_message": "Please upload data first",
+            "redirect_url": "/data-upload"
+        })
+
+# Route to feature engineering page
+@app.get("/feature-engineering", response_class=HTMLResponse)
+async def feature_engineering_page(request: Request):
+    try:
+        intel = load_yaml("intel.yaml")
+        if not intel.get('train_preprocessed_path'):
+            return templates.TemplateResponse("error.html", {
+                "request": request,
+                "error_message": "Please complete preprocessing first",
+                "redirect_url": "/preprocessing"
+            })
+        return templates.TemplateResponse("feature_engineering.html", {"request": request})
+    except:
+        return templates.TemplateResponse("error.html", {
+            "request": request,
+            "error_message": "Please upload data and complete preprocessing first",
+            "redirect_url": "/data-upload"
+        })
+
+# Route to model building page
+@app.get("/model-building", response_class=HTMLResponse)
+async def model_building_page(request: Request):
+    try:
+        intel = load_yaml("intel.yaml")
+        if not intel.get('features_engineered_path'):
+            return templates.TemplateResponse("error.html", {
+                "request": request,
+                "error_message": "Please complete feature engineering first",
+                "redirect_url": "/feature-engineering"
+            })
+
+        builder = ModelBuilder()
+        available_models = builder.get_available_models()
+
+        return templates.TemplateResponse("model_building.html", {
+            "request": request,
+            "available_models": available_models
+        })
+    except:
+        return templates.TemplateResponse("error.html", {
+            "request": request,
+            "error_message": "Please complete previous steps first",
+            "redirect_url": "/data-upload"
+        })
+
+# Route to model optimization page
+@app.get("/optimization", response_class=HTMLResponse)
+async def optimization_page(request: Request):
+    try:
+        intel = load_yaml("intel.yaml")
+        if not intel.get('model_path'):
+            return templates.TemplateResponse("error.html", {
+                "request": request,
+                "error_message": "Please build a model first",
+                "redirect_url": "/model-building"
+            })
+
+        return templates.TemplateResponse("optimization.html", {"request": request})
+    except:
+        return templates.TemplateResponse("error.html", {
+            "request": request,
+            "error_message": "Please complete previous steps first",
+            "redirect_url": "/data-upload"
+        })
+
+# Route to results page
+@app.get("/results", response_class=HTMLResponse)
+async def results_page(request: Request):
+    try:
+        intel = load_yaml("intel.yaml")
+        if not intel.get('model_metrics_path'):
+            return templates.TemplateResponse("error.html", {
+                "request": request,
+                "error_message": "No model evaluation results available",
+                "redirect_url": "/model-building"
+            })
+
+        # Load evaluation metrics
+        metrics = load_yaml(intel['model_metrics_path'])
+
+        return templates.TemplateResponse("results.html", {
+            "request": request,
+            "metrics": metrics,
+            "dataset_name": intel.get('dataset_name', 'unnamed')
+        })
+    except:
+        return templates.TemplateResponse("error.html", {
+            "request": request,
+            "error_message": "Please complete previous steps first",
+            "redirect_url": "/data-upload"
+        })
+
+# API endpoints
+@app.post("/api/upload")
+async def upload_dataset(file: UploadFile = File(...), target_column: str = Form(...)):
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as temp:
+        contents = await file.read()
+        temp.write(contents)
+        temp.flush()
+        path = temp.name
+
+    df = pd.read_csv(path)
+    columns = df.columns.tolist()
+
+    ingestion = create_data_ingestion()
+    with open(path, "rb") as f:
+        ingestion.run_ingestion_pipeline(f, file.filename, target_column)
+
+    os.unlink(path)
+    return {"message": "Data ingestion completed", "columns": columns}
+
+@app.post("/api/preprocess")
+def preprocess_data(config: PreprocessingConfig):
+    intel = load_yaml("intel.yaml")
+    train_df = pd.read_csv(intel['train_path'])
+    test_df = pd.read_csv(intel['test_path'])
+    feature_store = load_yaml(intel['feature_store_path'])
+
+    numerical = feature_store.get('numerical_cols', [])
+    categorical = feature_store.get('categorical_cols', [])
+    nulls = [col for col in feature_store.get('contains_null', []) if col != intel['target_column']]
+    outliers = [col for col in feature_store.get('contains_outliers', []) if col != intel['target_column']]
+    skewed = [col for col in feature_store.get('skewed_cols', []) if col != intel['target_column']]
+
+    pipeline = PreprocessingPipeline({
+        'dataset_name': intel['dataset_name'],
+        'target_col': intel['target_column'],
+        'feature_store': feature_store
+    }, PreprocessingParameters())
+
+    if config.missing_values and nulls:
+        pipeline.handle_missing_values(config.missing_values, nulls)
+    if config.outliers and outliers:
+        pipeline.handle_outliers(config.outliers, outliers)
+    if config.skewedness and skewed:
+        pipeline.handle_skewed_data(config.skewedness, skewed)
+    if config.scaling and numerical:
+        pipeline.scale_numerical_features(config.scaling, numerical)
+    if config.encoding and categorical:
+        pipeline.encode_categorical_features(config.encoding, categorical, config.drop_first)
+
+    pipeline.fit(train_df)
+    train_p = pipeline.transform(train_df, handle_duplicates=config.handle_duplicates)
+    test_p = pipeline.transform(test_df, handle_duplicates=False)
+
+    interim_dir = Path(f"data/interim/data_{intel['dataset_name']}")
+    interim_dir.mkdir(parents=True, exist_ok=True)
+    train_path = interim_dir / "train_preprocessed.csv"
+    test_path = interim_dir / "test_preprocessed.csv"
+
+    pipeline_dir = Path(f"model/pipelines/preprocessing_{intel['dataset_name']}")
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
+    pipeline_path = pipeline_dir / "preprocessing.pkl"
+
+    train_p.to_csv(train_path, index=False)
+    test_p.to_csv(test_path, index=False)
+    pipeline.save(str(pipeline_path))
+
+    update_intel_yaml("intel.yaml", {
+        "train_preprocessed_path": str(train_path),
+        "test_preprocessed_path": str(test_path),
+        "preprocessing_pipeline_path": str(pipeline_path)
+    })
+
+    return {"message": "Preprocessing completed"}
+
+@app.post("/api/feature-engineering")
+def feature_engineering(request: FeatureEngineeringRequest):
+    result = run_feature_engineering(
+        config_path="intel.yaml",
+        use_feature_tools=request.use_feature_tools,
+        use_shap=request.use_shap,
+        n_features=request.n_features
+    )
+    return result
+
+@app.get("/api/available-models")
+def get_model_list():
+    builder = ModelBuilder()
+    return builder.get_available_models()
+
+@app.post("/api/build-model")
+def build_model(request: ModelBuildRequest):
+    builder = ModelBuilder()
+    result = builder.process_model_request(
+        model_name=request.model_name,
+        custom_params=request.custom_params
+    )
+    evaluation = run_evaluation("intel.yaml")
+    return {"build_result": result, "evaluation_result": evaluation}
+
+@app.post("/api/optimize")
+def optimize(request: OptimizationRequest):
+    if not request.optimize:
+        return {"message": "Optimization skipped."}
+
+    result = optimize_model(
+        optimize=request.optimize,
+        method=request.method,
+        n_trials=request.n_trials,
+        metric=request.metric,
+        config_overrides=None
+    )
+
+    evaluation = run_evaluation("intel.yaml")
+    return {"optimization_result": result, "evaluation_result": evaluation}
+
+@app.get("/api/generate-report")
+def generate_report():
+    report_generator = ProjectFlowReport("intel.yaml")
+    report_generator.generate_report()
+    intel = load_yaml("intel.yaml")
+    dataset_name = intel.get("dataset_name", "unnamed")
+    report_path = f"reports/pdf/projectflow_report_{dataset_name}.pdf"
+
+    if not os.path.exists(report_path):
+        raise HTTPException(status_code=500, detail="Report generation failed")
+
+    return FileResponse(
+        path=report_path,
+        filename=os.path.basename(report_path),
+        media_type="application/pdf"
+    )
+
+if __name__ == "__main__":
+    # Create required directories if they don't exist
+    os.makedirs("static/css", exist_ok=True)
+    os.makedirs("static/js", exist_ok=True)
+    os.makedirs("static/images", exist_ok=True)
+    os.makedirs("templates", exist_ok=True)
+
+    uvicorn.run("app:app", host="127.0.0.1", port=8010, reload=True)
