@@ -17,6 +17,7 @@ import sys
 # Import internal modules
 from src.data.data_ingestion import create_data_ingestion
 from utils import (load_yaml, update_intel_yaml)
+from src.data.data_cleaning import main as data_cleaning_main
 from src.features.feature_engineering import run_feature_engineering
 from src.model.model_building import ModelBuilder
 from src.model.model_evaluation import run_evaluation, get_evaluation_summary
@@ -300,7 +301,7 @@ async def upload_dataset(file: UploadFile = File(...), target_column: str = Form
         path = temp.name
 
     df = pd.read_csv(path)
-    columns = df.columns.tolist()  # Get columns list
+    columns = df.columns.tolist()
 
     ingestion = create_data_ingestion()
     with open(path, "rb") as f:
@@ -309,16 +310,21 @@ async def upload_dataset(file: UploadFile = File(...), target_column: str = Form
     os.unlink(path)
     ingestion.save_intel_yaml()
 
-    # Return columns in the response
+    # Run data cleaning after ingestion
+    try:
+        data_cleaning_main()  # This processes the raw data and updates intel.yaml
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Data cleaning failed: {str(e)}")
+
     return {
-        "message": "Data ingestion completed",
+        "message": "Data ingestion and cleaning completed",
         "columns": columns
     }
 
 
+# Update the /api/preprocess endpoint to use cleaned data paths
 @app.post("/api/preprocess")
 def preprocess_data(config: PreprocessingConfig):
-
     from src.data.data_preprocessing import (
         PreprocessingPipeline, PreprocessingParameters,
         check_for_duplicates, get_numerical_columns,
@@ -327,8 +333,13 @@ def preprocess_data(config: PreprocessingConfig):
     )
 
     intel = load_yaml("intel.yaml")
-    train_df = pd.read_csv(intel['train_path'])
-    test_df = pd.read_csv(intel['test_path'])
+    # Use cleaned data paths from data_cleaning
+    train_df = pd.read_csv(intel['cleaned_train_path'])
+    if 'cleaned_test_path' in intel:
+        test_df = pd.read_csv(intel['cleaned_test_path'])
+    else:
+        test_df = pd.DataFrame()
+
     feature_store = load_yaml(intel['feature_store_path'])
 
     numerical = feature_store.get('numerical_cols', [])

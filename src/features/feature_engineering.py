@@ -8,6 +8,7 @@ and integration with preprocessing pipeline.
 API-friendly version that can be called from FastAPI endpoints.
 """
 import matplotlib
+
 matplotlib.use('Agg')
 import os
 import sys
@@ -367,22 +368,14 @@ class FeatureEngineer:
             self.logger.error(f"Error saving data: {str(e)}")
             raise
 
-    def _save_pipelines(self, transformation_pipeline):
+    def _load_cleaning_pipeline(self):
         try:
-            self.logger.info(f"Saving transformation pipeline to {self.transformation_pipeline_path}")
-            with open(self.transformation_pipeline_path, 'wb') as f:
-                cloudpickle.dump(transformation_pipeline, f)
-
-            preprocessing_pipeline = self._load_preprocessing_pipeline()
-            processor_pipeline = Pipeline([
-                ('preprocessing', preprocessing_pipeline),
-                ('transformation', transformation_pipeline)
-            ])
-            self.logger.info(f"Saving processor pipeline to {self.processor_pipeline_path}")
-            with open(self.processor_pipeline_path, 'wb') as f:
-                cloudpickle.dump(processor_pipeline, f)
+            cleaning_path = self.project_root / f"model/pipelines/preprocessing_{self.dataset_name}/cleaning.pkl"
+            self.logger.info(f"Loading cleaning pipeline from {cleaning_path}")
+            with open(cleaning_path, 'rb') as f:
+                return cloudpickle.load(f)
         except Exception as e:
-            self.logger.error(f"Error saving pipelines: {str(e)}")
+            self.logger.error(f"Error loading cleaning pipeline: {str(e)}")
             raise
 
     def _load_preprocessing_pipeline(self):
@@ -393,6 +386,30 @@ class FeatureEngineer:
                 return cloudpickle.load(f)
         except Exception as e:
             self.logger.error(f"Error loading preprocessing pipeline: {str(e)}")
+            raise
+
+    def _save_pipelines(self, transformation_pipeline):
+        try:
+            self.logger.info(f"Saving transformation pipeline to {self.transformation_pipeline_path}")
+            with open(self.transformation_pipeline_path, 'wb') as f:
+                cloudpickle.dump(transformation_pipeline, f)
+
+            # Load cleaning and preprocessing pipelines
+            cleaning_pipeline = self._load_cleaning_pipeline()
+            preprocessing_pipeline = self._load_preprocessing_pipeline()
+
+            # Create a combined pipeline with all three components
+            processor_pipeline = Pipeline([
+                ('cleaning', cleaning_pipeline),
+                ('preprocessing', preprocessing_pipeline),
+                ('transformation', transformation_pipeline)
+            ])
+
+            self.logger.info(f"Saving processor pipeline to {self.processor_pipeline_path}")
+            with open(self.processor_pipeline_path, 'wb') as f:
+                cloudpickle.dump(processor_pipeline, f)
+        except Exception as e:
+            self.logger.error(f"Error saving pipelines: {str(e)}")
             raise
 
     def _log_feature_info(self, pipeline, use_feature_tools, use_shap):

@@ -704,41 +704,52 @@ class PreprocessingPipeline:
 
     def configure_pipeline(self):
         """Configure pipeline based on received parameters"""
+        # Filter out target column from all preprocessing columns
+        target_col = self.target_column
+
         # Missing values handling
-        if self.params.missing_values_columns:
+        missing_cols = [col for col in self.params.missing_values_columns if col != target_col]
+        if missing_cols:
             self.missing_handler = MissingValueHandler(
                 method=self.params.missing_values_method,
-                columns=self.params.missing_values_columns
+                columns=missing_cols
             )
 
-        self.id_dropper = IDColumnDropper()
+        # Initialize ID dropper with config from feature store
+        self.id_dropper = IDColumnDropper(
+            id_cols=self.feature_store.get('id_cols', [])
+        )
 
         # Outlier handling
-        if self.params.outliers_method and self.params.outliers_columns:
+        outlier_cols = [col for col in self.params.outliers_columns if col != target_col]
+        if self.params.outliers_method and outlier_cols:
             self.outlier_handler = OutlierHandler(
                 method=self.params.outliers_method,
-                columns=self.params.outliers_columns
+                columns=outlier_cols
             )
 
         # Skewed data handling
-        if self.params.skewness_method and self.params.skewness_columns:
+        skewed_cols = [col for col in self.params.skewness_columns if col != target_col]
+        if self.params.skewness_method and skewed_cols:
             self.skewed_handler = SkewedDataHandler(
                 method=self.params.skewness_method,
-                columns=self.params.skewness_columns
+                columns=skewed_cols
             )
 
         # Numerical scaling
-        if self.params.scaling_method and self.params.scaling_columns:
+        scaling_cols = [col for col in self.params.scaling_columns if col != target_col]
+        if self.params.scaling_method and scaling_cols:
             self.numerical_scaler = NumericalScaler(
                 method=self.params.scaling_method,
-                columns=self.params.scaling_columns
+                columns=scaling_cols
             )
 
         # Categorical encoding
-        if self.params.categorical_encoding_method and self.params.categorical_columns:
+        categorical_cols = [col for col in self.params.categorical_columns if col != target_col]
+        if self.params.categorical_encoding_method and categorical_cols:
             self.categorical_encoder = CategoricalEncoder(
                 method=self.params.categorical_encoding_method,
-                columns=self.params.categorical_columns,
+                columns=categorical_cols,
                 drop_first=self.params.drop_first
             )
 
@@ -1295,8 +1306,8 @@ def main():
         # Extract information from intel.yaml
         dataset_name = intel.get('dataset_name')
         feature_store_path = intel.get('feature_store_path')
-        train_path = intel.get('train_path')
-        test_path = intel.get('test_path')
+        train_path = intel.get('cleaned_train_path')
+        test_path = intel.get('cleaned_test_path')
         target_column = intel.get('target_column')
 
         # Load feature store
