@@ -1,0 +1,58 @@
+name: SemiAuto Regression
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  automl-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.9
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Data Ingestion
+      run: python src/components/data_ingestion.py
+
+    - name: Run Data Cleaning
+      run: python src/components/data_cleaning.py
+
+    - name: Run Data Preprocessing
+      run: python src/components/data_preprocessing.py
+
+    - name: Run Feature Engineering
+      run: python src/components/feature_engineering.py
+
+    - name: Run Model Building
+      run: python src/components/model_building.py
+
+    - name: Run Initial Model Evaluation
+      run: python src/components/model_evaluation.py
+
+    - name: Run Model Optimization
+      run: python src/components/model_optimization.py
+
+    - name: Run Optimized Model Evaluation
+      run: python src/components/model_evaluation.py
+
+    - name: Generate Project Flow Report
+      run: python src/components/projectflow_report.py
+
+    - name: Upload Report
+      uses: actions/upload-artifact@v2
+      with:
+        name: project-report
+        path: reports/pdf/projectflow_report_*.pdf
