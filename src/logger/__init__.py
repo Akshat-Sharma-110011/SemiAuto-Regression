@@ -5,6 +5,7 @@ from datetime import datetime
 import sys
 import colorama
 from colorama import Fore, Back, Style
+import threading
 
 # Initialize colorama (required for Windows)
 colorama.init(autoreset=True)
@@ -78,52 +79,70 @@ class SectionLogger:
             logger.critical(f"{Fore.MAGENTA}{header}{Style.RESET_ALL}")
 
 
-# Flag to track if the logger has been configured already
+# Thread-safe flag and lock for logger configuration
 _logger_configured = False
+_config_lock = threading.Lock()
 
 
 def configure_logger():
     """
     Configures logging with a rotating file handler and a console handler with pretty formatting.
-    Only configures once to prevent duplicate handlers.
+    Thread-safe and only configures once to prevent duplicate handlers.
     """
     global _logger_configured
 
-    # Skip if already configured
-    if _logger_configured:
-        return
+    # Thread-safe check to prevent multiple configurations
+    with _config_lock:
+        if _logger_configured:
+            return
 
-    # Create a custom logger
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+        # Get the root logger
+        logger = logging.getLogger()
 
-    # Clear any existing handlers
-    if logger.handlers:
-        for handler in logger.handlers:
-            logger.removeHandler(handler)
+        # Only configure if no handlers exist or if they're not our custom handlers
+        if not logger.handlers or not any(
+                isinstance(h, (RotatingFileHandler, logging.StreamHandler)) for h in logger.handlers):
+            # Set logger level
+            logger.setLevel(logging.DEBUG)
 
-    # Console handler with colored formatter
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(PrettyFormatter(use_color=True))
-    console_handler.setLevel(logging.INFO)
+            # Console handler with colored formatter
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setFormatter(PrettyFormatter(use_color=True))
+            console_handler.setLevel(logging.INFO)
+            console_handler.set_name("console_handler")  # Name the handler for identification
 
-    # File handler with plain formatter and rotation
-    file_handler = RotatingFileHandler(log_file_path, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT, encoding="utf-8")
-    file_handler.setFormatter(PrettyFormatter(use_color=False))
-    file_handler.setLevel(logging.INFO)
+            # File handler with plain formatter and rotation
+            file_handler = RotatingFileHandler(
+                log_file_path,
+                maxBytes=MAX_LOG_SIZE,
+                backupCount=BACKUP_COUNT,
+                encoding="utf-8"
+            )
+            file_handler.setFormatter(PrettyFormatter(use_color=False))
+            file_handler.setLevel(logging.INFO)
+            file_handler.set_name("file_handler")  # Name the handler for identification
 
-    # Add handlers to the logger
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+            # Add handlers to the logger
+            logger.addHandler(file_handler)
+            logger.addHandler(console_handler)
 
-    # Log startup information
-    logger.info(f"Logger initialized. Log file: {log_file_path}")
+            # Log startup information
+            logger.info(f"Logger initialized. Log file: {log_file_path}")
 
-    # Set the flag to indicate logger is configured
-    _logger_configured = True
+        # Set the flag to indicate logger is configured
+        _logger_configured = True
 
 
-# Configure the logger
+def get_logger(name=None):
+    """
+    Get a logger instance with the specified name.
+    Ensures the logger is properly configured.
+    """
+    configure_logger()
+    return logging.getLogger(name)
+
+
+# Configure the logger on import
 configure_logger()
 
 # Export the section logger for use in other modules
