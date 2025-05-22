@@ -31,44 +31,44 @@ jobs:
       - name: Step 1 - Data Ingestion
         run: |
           echo "Running Data Ingestion..."
-          python src/components/data_ingestion.py
+          python src/data/data_ingestion.py
 
       - name: Step 2 - Data Cleaning
         run: |
           echo "Running Data Cleaning..."
-          python src/components/data_cleaning.py
+          python src/data/data_cleaning.py
 
       - name: Step 3 - Data Preprocessing
         run: |
           echo "Running Data Preprocessing..."
-          python src/components/data_preprocessing.py
+          python src/data/data_preprocessing.py
 
       - name: Step 4 - Feature Engineering
         run: |
           echo "Running Feature Engineering..."
-          python src/components/feature_engineering.py
+          python src/features/feature_engineering.py
 
       - name: Step 5 - Model Building
         run: |
           echo "Running Model Building..."
-          python src/components/model_building.py
+          python src/model/model_building.py
 
       - name: Step 6 - Initial Model Evaluation
         run: |
           echo "Evaluating Model..."
-          python src/components/model_evaluation.py --stage initial
+          python src/model/model_evaluation.py --stage initial
 
       - name: Step 7 - Model Optimization
         run: |
           echo "Optimizing Model..."
-          python src/components/model_optimization.py
+          python src/model/model_optimization.py
 
       - name: Step 8 - Optimized Model Evaluation
         run: |
           echo "Evaluating Optimized Model..."
-          python src/components/model_evaluation.py --stage optimized
+          python src/model/model_evaluation.py --stage optimized
 
       - name: Step 9 - Generate Projectflow Report
         run: |
           echo "Generating Final Report..."
-          python src/components/projectflow_report.py
+          python src/visualization/projectflow_report.py
