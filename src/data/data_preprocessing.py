@@ -754,46 +754,26 @@ class PreprocessingPipeline:
             )
 
     def handle_missing_values(self, method: str = 'mean', columns: List[str] = None):
-        """
-        Set up the missing value handler.
-
-        Args:
-            method (str): Method to use for handling missing values
-            columns (List[str]): List of columns to handle missing values for
-        """
+        if columns:
+            columns = [col for col in columns if col != self.target_column]
         self.missing_handler = MissingValueHandler(method=method, columns=columns)
         logger.info(f"Set up missing value handler with method: {method}")
 
     def handle_outliers(self, method: str = 'IQR', columns: List[str] = None):
-        """
-        Set up the outlier handler.
-
-        Args:
-            method (str): Method to use for outlier detection
-            columns (List[str]): List of columns to handle outliers for
-        """
+        if columns:
+            columns = [col for col in columns if col != self.target_column]
         self.outlier_handler = OutlierHandler(method=method, columns=columns)
         logger.info(f"Set up outlier handler with method: {method}")
 
     def handle_skewed_data(self, method: str = 'yeo-johnson', columns: List[str] = None):
-        """
-        Set up the skewed data handler.
-
-        Args:
-            method (str): Method to use for handling skewed data
-            columns (List[str]): List of columns to handle skewed data for
-        """
+        if columns:
+            columns = [col for col in columns if col != self.target_column]
         self.skewed_handler = SkewedDataHandler(method=method, columns=columns)
         logger.info(f"Set up skewed data handler with method: {method}")
 
     def scale_numerical_features(self, method: str = 'standard', columns: List[str] = None):
-        """
-        Set up the numerical scaler.
-
-        Args:
-            method (str): Method to use for scaling numerical features
-            columns (List[str]): List of columns to scale
-        """
+        if columns:
+            columns = [col for col in columns if col != self.target_column]
         self.numerical_scaler = NumericalScaler(method=method, columns=columns)
         logger.info(f"Set up numerical scaler with method: {method}")
 
@@ -1040,7 +1020,7 @@ async def api_preprocessing_workflow(
         }
 
         # Move target column to last position if present
-        target_column = config.get('target_column')
+        target_column = config.get('target_col')
         if target_column in train_preprocessed.columns:
             cols = [col for col in train_preprocessed.columns if col != target_column] + [target_column]
             train_preprocessed = train_preprocessed[cols]
@@ -1171,13 +1151,14 @@ def check_for_duplicates(df: pd.DataFrame) -> bool:
         logger.info("No duplicate rows found")
         return False
 
+
 def check_for_skewness(df: pd.DataFrame, columns: List[str], threshold: float = 0.5) -> Dict[str, float]:
     """
     Check for skewness in the specified columns.
 
     Args:
         df (pd.DataFrame): Input dataframe
-        columns (List[str]): Columns to check for skewness
+        columns (List[str]): Columns to check for skewness (should already exclude target)
         threshold (float): Skewness threshold (abs value) to consider a column skewed
 
     Returns:
@@ -1187,6 +1168,10 @@ def check_for_skewness(df: pd.DataFrame, columns: List[str], threshold: float = 
 
     for col in columns:
         if col not in df.columns:
+            continue
+
+        # Only process numeric columns
+        if not pd.api.types.is_numeric_dtype(df[col]):
             continue
 
         skewness = df[col].skew()
@@ -1254,6 +1239,11 @@ def recommend_skewness_transformer(df: pd.DataFrame, column: str) -> str:
     Returns:
         str: Recommended transformer ('yeo-johnson' or 'box-cox')
     """
+    # Safety check - don't process target column
+    if not pd.api.types.is_numeric_dtype(df[column]):
+        logger.warning(f"Column {column} is not numeric, defaulting to yeo-johnson")
+        return 'yeo-johnson'
+
     # Check if column contains negative or zero values
     if df[column].min() <= 0:
         logger.info(f"Column {column} contains negative or zero values, recommending Yeo-Johnson transformation")
@@ -1283,7 +1273,8 @@ def recommend_skewness_transformer(df: pd.DataFrame, column: str) -> str:
 
     # Compare and recommend
     if abs(bc_skewness) <= abs(yj_skewness):
-        logger.info(f"Box-Cox transformation recommended for {column} (skewness: {bc_skewness:.4f} vs {yj_skewness:.4f})")
+        logger.info(
+            f"Box-Cox transformation recommended for {column} (skewness: {bc_skewness:.4f} vs {yj_skewness:.4f})")
         return 'box-cox'
     else:
         logger.info(f"Yeo-Johnson transformation recommended for {column} (skewness: {yj_skewness:.4f} vs {bc_skewness:.4f})")
@@ -1308,7 +1299,7 @@ def main():
         feature_store_path = intel.get('feature_store_path')
         train_path = intel.get('cleaned_train_path')
         test_path = intel.get('cleaned_test_path')
-        target_column = intel.get('target_column')
+        target_column = intel.get('target_col')
 
         # Load feature store
         feature_store = load_yaml(feature_store_path)
@@ -1424,7 +1415,7 @@ def main():
                 logger.warning("Invalid choice, using default (IQR)")
                 pipeline.handle_outliers(method='IQR', columns=outlier_columns)
 
-        # Handle skewed data if any
+        # Handle skewed data if any - FIXED: Use filtered skewed_columns
         if skewed_columns:
             logger.info(f"Found columns with skewed distributions: {skewed_columns}")
             print(f"Found columns with skewed distributions: {skewed_columns}")
@@ -1463,7 +1454,7 @@ def main():
                 logger.warning("Invalid choice, using default (Yeo-Johnson)")
                 pipeline.handle_skewed_data(method='yeo-johnson', columns=skewed_columns)
 
-        # Scale numerical features
+        # Scale numerical features - FIXED: Exclude target column
         numerical_columns = get_numerical_columns(train_df, exclude=[target_column])
         if numerical_columns:
             logger.info(f"Found numerical columns: {numerical_columns}")
@@ -1487,7 +1478,7 @@ def main():
             else:
                 logger.warning("Invalid choice, skipping numerical feature scaling")
 
-        # Encode categorical features
+        # Encode categorical features - FIXED: Use filtered categorical_columns
         if categorical_columns:
             logger.info(f"Found categorical columns: {categorical_columns}")
             print(f"\nFound categorical columns: {categorical_columns}")
