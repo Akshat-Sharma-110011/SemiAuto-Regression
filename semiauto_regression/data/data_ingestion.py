@@ -17,7 +17,7 @@ import shutil
 # Add the parent directory to the system path to import logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
-    from logger import section, configure_logger
+    from semiauto_regression.logger import section, configure_logger
 except ImportError:
     # Fallback logger functions if not available
     def section(text, logger=None, char="-", length=50):

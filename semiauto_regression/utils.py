@@ -3,7 +3,7 @@ from typing import Dict
 
 import yaml
 import logging
-from src.logger import configure_logger, section
+from semiauto_regression.logger import configure_logger, section
 
 configure_logger()
 logger = logging.getLogger("utils")

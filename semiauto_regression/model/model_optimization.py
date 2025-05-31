@@ -39,7 +39,7 @@ import lightgbm as lgb
 import catboost as cb
 
 # Import custom logger
-from src.logger import section, configure_logger
+from semiauto_regression.logger import section, configure_logger
 
 INTEL_PATH = "intel.yaml"
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

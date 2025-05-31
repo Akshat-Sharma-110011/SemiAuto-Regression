@@ -27,7 +27,7 @@ from sklearn.metrics import (
 
 # Import custom logger
 import logging
-from src.logger import section, configure_logger  # Configure logger
+from semiauto_regression.logger import section, configure_logger  # Configure logger
 
 # Configure logger
 configure_logger()

@@ -16,7 +16,7 @@ import shutil
 import sys
 
 # Configure logging first thing - before any other imports that might use logging
-from src.logger import configure_logger, get_logger
+from semiauto_regression.logger import configure_logger, get_logger
 
 configure_logger()  # Configure logging once at startup
 
@@ -24,13 +24,14 @@ configure_logger()  # Configure logging once at startup
 logger = get_logger("FastAPI-App")
 
 # Import internal modules after logging is configured
-from src.data.data_ingestion import create_data_ingestion
-from utils import (load_yaml, update_intel_yaml)
-from src.data.data_cleaning import main as data_cleaning_main
-from src.features.feature_engineering import run_feature_engineering
-from src.model.model_building import ModelBuilder
-from src.model.model_evaluation import run_evaluation, get_evaluation_summary
-from src.model.model_optimization import optimize_model
+from semiauto_regression.data.data_ingestion import create_data_ingestion
+from semiauto_regression.utils import (load_yaml, update_intel_yaml)
+from semiauto_regression.data.data_cleaning import main as data_cleaning_main
+from semiauto_regression.features.feature_engineering import run_feature_engineering
+from semiauto_regression.model.model_building import ModelBuilder
+from semiauto_regression.model.model_evaluation import run_evaluation, get_evaluation_summary
+from semiauto_regression.model.model_optimization import optimize_model
+from semiauto_regression.custom_transformers import *
 
 # Log application startup
 logger.info("Starting SemiAuto Regression FastAPI application")
@@ -285,7 +286,7 @@ async def upload_dataset(file: UploadFile = File(...), target_column: str = Form
 def preprocess_data(config: PreprocessingConfig):
     logger.info("Starting data preprocessing")
 
-    from src.data.data_preprocessing import (
+    from semiauto_regression.data.data_preprocessing import (
         PreprocessingPipeline, PreprocessingParameters,
         check_for_duplicates, get_numerical_columns,
         get_categorical_columns, recommend_skewness_transformer,
@@ -493,7 +494,7 @@ def download_model():
 @app.get("/api/download-pipeline")
 def download_pipeline():
     """
-    Endpoint to download the preprocessing and feature engineering pipeline.
+    Endpoint to download the combined preprocessing and feature engineering pipeline.
     Returns the combined processor pipeline if available, otherwise returns
     the preprocessing pipeline.
     """
@@ -502,39 +503,42 @@ def download_pipeline():
         intel = load_yaml("intel.yaml")
         dataset_name = intel.get("dataset_name", "unnamed")
 
-        # Check if the combined processor pipeline exists
-        processor_path = Path(f"model/pipelines/performance_{dataset_name}/processor.pkl")
-        if processor_path.exists():
-            logger.info(f"Serving combined pipeline: combined_pipeline_{dataset_name}.pkl")
+        # First priority: Combined processor pipeline
+        processor_path = intel.get("processor_pipeline_path")
+        if processor_path and os.path.exists(processor_path):
+            filename = f"processor_pipeline_{dataset_name}.pkl"
+            logger.info(f"Serving combined processor pipeline: {filename}")
             return FileResponse(
-                path=str(processor_path),
-                filename=f"combined_pipeline_{dataset_name}.pkl",
+                path=processor_path,
+                filename=filename,
                 media_type="application/octet-stream"
             )
 
-        # Fall back to preprocessing pipeline if combined doesn't exist
-        pipeline_dir = Path(f"model/pipelines/preprocessing_{dataset_name}")
-        preprocessing_path = pipeline_dir / "preprocessing.pkl"
-        if preprocessing_path.exists():
-            logger.info(f"Serving preprocessing pipeline: preprocessing_pipeline_{dataset_name}.pkl")
+        # Second priority: Preprocessing pipeline
+        preprocessing_path = intel.get("preprocessing_pipeline_path")
+        if preprocessing_path and os.path.exists(preprocessing_path):
+            filename = f"preprocessing_pipeline_{dataset_name}.pkl"
+            logger.info(f"Serving preprocessing pipeline: {filename}")
             return FileResponse(
-                path=str(preprocessing_path),
-                filename=f"preprocessing_pipeline_{dataset_name}.pkl",
+                path=preprocessing_path,
+                filename=filename,
                 media_type="application/octet-stream"
             )
 
-        # Last resort: use the path from intel.yaml
-        pipeline_path = intel.get("preprocessing_pipeline_path")
-        if not pipeline_path or not os.path.exists(pipeline_path):
-            logger.error("Pipeline file not found")
-            raise HTTPException(status_code=404, detail="Pipeline file not found")
+        # Third priority: Transformation pipeline
+        transformation_path = intel.get("transformation_pipeline_path")
+        if transformation_path and os.path.exists(transformation_path):
+            filename = f"transformation_pipeline_{dataset_name}.pkl"
+            logger.info(f"Serving transformation pipeline: {filename}")
+            return FileResponse(
+                path=transformation_path,
+                filename=filename,
+                media_type="application/octet-stream"
+            )
 
-        logger.info(f"Serving fallback pipeline: {os.path.basename(pipeline_path)}")
-        return FileResponse(
-            path=pipeline_path,
-            filename=os.path.basename(pipeline_path),
-            media_type="application/octet-stream"
-        )
+        logger.error("Pipeline file not found")
+        raise HTTPException(status_code=404, detail="Pipeline file not found")
+
     except Exception as e:
         logger.error(f"Error downloading pipeline: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error downloading pipeline: {str(e)}")
@@ -570,7 +574,7 @@ def download_feature_pipeline():
 def generate_report():
     logger.info("Report generation requested")
     try:
-        from src.visualization.projectflow_report import ProjectFlowReport
+        from semiauto_regression.visualization.projectflow_report import ProjectFlowReport
         report_generator = ProjectFlowReport("intel.yaml")
         report_generator.generate_report()
         intel = load_yaml("intel.yaml")
@@ -601,4 +605,4 @@ if __name__ == "__main__":
     os.makedirs("templates", exist_ok=True)
 
     logger.info("Starting FastAPI server on 127.0.0.1:8010")
-    uvicorn.run("app:app", host="127.0.0.1", port=8010, reload=True)
+    uvicorn.run("app:app", host="127.0.0.1", port=8030, reload=True)

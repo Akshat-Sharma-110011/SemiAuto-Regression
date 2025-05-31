@@ -15,14 +15,19 @@ import string
 from functools import reduce
 import warnings
 from collections import Counter
+from semiauto_regression.logger import section
+from sklearn.preprocessing import (
+    PowerTransformer,
+    StandardScaler,
+    RobustScaler,
+    MinMaxScaler,
+    OneHotEncoder,
+    LabelEncoder
+)
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.utils.validation import check_is_fitted
 
-# Import the logger
-from src.logger import section
-
-# Suppress specific pandas warnings that might clutter logs
-warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
-
-# Get module level logger
 logger = logging.getLogger(__name__)
 
 
@@ -95,9 +100,10 @@ class DataCleaner:
     It can be fitted on training data and then applied to test data.
     """
 
-    def __init__(self, parameters: Optional[CleaningParameters] = None):
-        """Initialize the DataCleaner with optional parameters."""
+    def __init__(self, parameters: Optional[CleaningParameters] = None, project_root: Optional[Path] = None):
+        """Initialize with optional project root path"""
         self.params = parameters if parameters is not None else CleaningParameters()
+        self.project_root = project_root
         self.stats = {
             "columns_dropped": [],
             "rows_dropped": 0,
@@ -128,15 +134,18 @@ class DataCleaner:
             logger.info(f"Column {column}: {operation} (contains {before} nulls, {null_pct}%)")
 
     def _get_intel_config(self) -> dict:
-        """Load the intel.yaml configuration file."""
+        """Load intel.yaml using the provided project root"""
+        if self.project_root is None:
+            logger.warning("project_root is None, cannot load intel.yaml")
+            return {}
+
+        intel_path = self.project_root / 'intel.yaml'
+
+        if not intel_path.exists():
+            logger.warning(f"Intel config not found at {intel_path}")
+            return {}
+
         try:
-            root_dir = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
-            intel_path = root_dir / 'intel.yaml'
-
-            if not intel_path.exists():
-                logger.warning(f"Intel config not found at {intel_path}")
-                return {}
-
             with open(intel_path, 'r') as f:
                 config = yaml.safe_load(f)
             return config
@@ -145,19 +154,22 @@ class DataCleaner:
             return {}
 
     def _get_feature_store_config(self, dataset_name: str) -> dict:
-        """Load the feature store configuration for the specific dataset."""
+        """Load feature store config using the provided project root"""
+        if self.project_root is None:
+            logger.warning("project_root is None, cannot load feature store config")
+            return {}
+
+        feature_store_path = (
+            self.project_root / 'references' /
+            f'feature_store_{dataset_name}' /
+            'feature_store.yaml'
+        )
+
+        if not feature_store_path.exists():
+            logger.warning(f"Feature store config not found at {feature_store_path}")
+            return {}
+
         try:
-            root_dir = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
-            feature_store_path = (
-                    root_dir / 'references' /
-                    f'feature_store_{dataset_name}' /
-                    'feature_store.yaml'
-            )
-
-            if not feature_store_path.exists():
-                logger.warning(f"Feature store config not found at {feature_store_path}")
-                return {}
-
             with open(feature_store_path, 'r') as f:
                 config = yaml.safe_load(f)
             return config
@@ -166,15 +178,18 @@ class DataCleaner:
             return {}
 
     def _update_intel_config(self, dataset_name: str, update_dict: dict):
-        """Update the intel.yaml file with cleaning information."""
+        """Update intel.yaml using the provided project root"""
+        if self.project_root is None:
+            logger.warning("project_root is None, cannot update intel.yaml")
+            return
+
+        intel_path = self.project_root / 'intel.yaml'
+
+        if not intel_path.exists():
+            logger.warning(f"Intel config not found at {intel_path}, cannot update")
+            return
+
         try:
-            root_dir = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
-            intel_path = root_dir / 'intel.yaml'
-
-            if not intel_path.exists():
-                logger.warning(f"Intel config not found at {intel_path}, cannot update")
-                return
-
             with open(intel_path, 'r') as f:
                 config = yaml.safe_load(f)
 
@@ -184,7 +199,7 @@ class DataCleaner:
             with open(intel_path, 'w') as f:
                 yaml.dump(config, f, default_flow_style=False)
 
-            logger.info(f"Updated intel config with cleaning information")
+            logger.info("Updated intel config with cleaning information")
         except Exception as e:
             logger.error(f"Error updating intel config: {str(e)}")
 
@@ -991,134 +1006,766 @@ class DataCleaner:
             raise
 
 
-def main(dataset_name=None):
+class OutlierHandler(BaseEstimator, TransformerMixin):
     """
-    Main entry point for data cleaning.
-
-    Args:
-        dataset_name: Optional name of the dataset to clean.
-                     If None, will try to load from intel.yaml.
+    Custom transformer for handling outliers using either IQR or Z-Score method.
     """
-    try:
-        logger.info("Starting data cleaning process")
-        section("Data Cleaning Process", logger)
 
-        # Initialize the data cleaner
-        cleaner = DataCleaner()
+    def __init__(self, method: str = 'IQR', columns: List[str] = None):
+        """
+        Initialize the OutlierHandler.
 
-        # Load configuration
-        if dataset_name is None:
-            intel = cleaner._get_intel_config()
-            dataset_name = intel.get('dataset_name')
+        Args:
+            method (str): Method to use for outlier detection ('IQR' or 'Z-Score')
+            columns (List[str]): List of columns to handle outliers for
+        """
+        self.method = method
+        self.columns = columns
+        self.thresholds = {}
 
-            if not dataset_name:
-                logger.error("Dataset name not provided and not found in intel.yaml")
-                return
+        # Validate method
+        if method not in ['IQR', 'Z-Score']:
+            raise ValueError("Method must be either 'IQR' or 'Z-Score'")
 
-        logger.info(f"Processing dataset: {dataset_name}")
+        logger.info(f"Initialized OutlierHandler with method: {method}")
 
-        # Construct paths using intel.yaml values
-        intel = cleaner._get_intel_config()
-        train_path = intel.get('train_path')
-        test_path = intel.get('test_path')
-        cleaned_dir = os.path.join('data', 'cleaned', f'data_{dataset_name}')
-        pipeline_dir = os.path.join('model', 'pipelines', f'preprocessing_{dataset_name}')
+    def fit(self, X, y=None):
+        """
+        Calculate the thresholds for outlier detection.
 
-        # Ensure directories exist
-        os.makedirs(cleaned_dir, exist_ok=True)
-        os.makedirs(pipeline_dir, exist_ok=True)
+        Args:
+            X (pd.DataFrame): Input data
+            y: Ignored
 
-        # Load raw data
-        if not os.path.exists(train_path):
-            logger.error(f"Training data not found at {train_path}")
-            return
+        Returns:
+            self
+        """
+        # Only process if columns are provided
+        if not self.columns:
+            logger.warning("No columns provided for outlier handling")
+            return self
 
-        if not os.path.exists(test_path):
-            logger.warning(f"Test data not found at {test_path}, will only process training data")
-            has_test = False
-        else:
-            has_test = True
+        # Calculate thresholds for each column
+        for col in self.columns:
+            if col not in X.columns:
+                logger.warning(f"Column {col} not found in input data")
+                continue
 
-        # Load training data
-        logger.info(f"Loading training data from {train_path}")
+            if self.method == 'IQR':
+                Q1 = X[col].quantile(0.25)
+                Q3 = X[col].quantile(0.75)
+                IQR = Q3 - Q1
+
+                lower_bound = Q1 - 1.5 * IQR
+                upper_bound = Q3 + 1.5 * IQR
+
+                self.thresholds[col] = {'lower': lower_bound, 'upper': upper_bound}
+                logger.info(f"IQR thresholds for {col}: lower={lower_bound:.4f}, upper={upper_bound:.4f}")
+
+            elif self.method == 'Z-Score':
+                mean = X[col].mean()
+                std = X[col].std()
+
+                self.thresholds[col] = {'mean': mean, 'std': std}
+                logger.info(f"Z-Score parameters for {col}: mean={mean:.4f}, std={std:.4f}")
+
+        return self
+
+    def transform(self, X):
+        """
+        Handle outliers in the data according to the fitted thresholds.
+
+        Args:
+            X (pd.DataFrame): Input data
+
+        Returns:
+            pd.DataFrame: Transformed data with outliers handled
+        """
+        X_transformed = X.copy()
+
+        if not self.columns or not self.thresholds:
+            logger.warning("No columns or thresholds available for outlier handling")
+            return X_transformed
+
+        for col in self.columns:
+            if col not in X_transformed.columns or col not in self.thresholds:
+                continue
+
+            if self.method == 'IQR':
+                lower = self.thresholds[col]['lower']
+                upper = self.thresholds[col]['upper']
+
+                # Cap outliers at thresholds
+                outliers_lower = X_transformed[col] < lower
+                outliers_upper = X_transformed[col] > upper
+
+                if outliers_lower.any() or outliers_upper.any():
+                    count_lower = outliers_lower.sum()
+                    count_upper = outliers_upper.sum()
+                    logger.info(
+                        f"Handling outliers in {col}: {count_lower} below lower bound, {count_upper} above upper bound")
+
+                    X_transformed.loc[outliers_lower, col] = lower
+                    X_transformed.loc[outliers_upper, col] = upper
+
+            elif self.method == 'Z-Score':
+                mean = self.thresholds[col]['mean']
+                std = self.thresholds[col]['std']
+
+                # Identify outliers (Z-Score > 3 or < -3)
+                z_scores = (X_transformed[col] - mean) / std
+                outliers = (z_scores > 3) | (z_scores < -3)
+
+                if outliers.any():
+                    count = outliers.sum()
+                    logger.info(f"Handling {count} Z-Score outliers in {col}")
+
+                    # Cap outliers at ±3 standard deviations
+                    X_transformed.loc[z_scores > 3, col] = mean + 3 * std
+                    X_transformed.loc[z_scores < -3, col] = mean - 3 * std
+
+        return X_transformed
+
+
+class IDColumnDropper(BaseEstimator, TransformerMixin):
+    def __init__(self, id_cols: List[str]):
+        self.id_columns = id_cols
+        logger.info(f"Initialized ID column dropper with columns: {id_cols}")
+
+    def fit(self, X, y=None):
+        # Verify which ID columns exist in the dataframe
+        existing_cols = [col for col in self.id_columns if col in X.columns]
+        logger.info(f"Found {len(existing_cols)}/{len(self.id_columns)} ID columns in data")
+        return self
+
+    def transform(self, X):
+        columns_to_drop = [col for col in self.id_columns if col in X.columns]
+        if columns_to_drop:
+            logger.info(f"Dropping ID columns: {columns_to_drop}")
+            return X.drop(columns=columns_to_drop)
+        return X
+
+
+class MissingValueHandler(BaseEstimator, TransformerMixin):
+    """
+    Custom transformer for handling missing values using specified method.
+    """
+
+    def __init__(self, method: str = 'mean', columns: List[str] = None):
+        """
+        Initialize the MissingValueHandler.
+
+        Args:
+            method (str): Method to use for handling missing values ('mean', 'median', 'mode', 'drop')
+            columns (List[str]): List of columns to handle missing values for
+        """
+        self.method = method
+        self.columns = columns
+        self.fill_values = {}
+
+        # Validate method
+        if method not in ['mean', 'median', 'mode', 'drop']:
+            raise ValueError("Method must be one of 'mean', 'median', 'mode', or 'drop'")
+
+        logger.info(f"Initialized MissingValueHandler with method: {method}")
+
+    def fit(self, X, y=None):
+        """
+        Calculate the fill values for missing value handling.
+
+        Args:
+            X (pd.DataFrame): Input data
+            y: Ignored
+
+        Returns:
+            self
+        """
+        # Handle drop method separately (nothing to fit)
+        if self.method == 'drop':
+            return self
+
+        # Only process if columns are provided
+        if not self.columns:
+            logger.warning("No columns provided for missing value handling")
+            return self
+
+        # Calculate fill values for each column
+        for col in self.columns:
+            if col not in X.columns:
+                logger.warning(f"Column {col} not found in input data")
+                continue
+
+            # Check if the method is appropriate for the column's data type
+            if self.method in ['mean', 'median']:
+                if pd.api.types.is_numeric_dtype(X[col]):
+                    if self.method == 'mean':
+                        self.fill_values[col] = X[col].mean()
+                    elif self.method == 'median':
+                        self.fill_values[col] = X[col].median()
+                    logger.info(f"{self.method.capitalize()} value for {col}: {self.fill_values[col]:.4f}")
+                else:
+                    # Fallback to mode for non-numeric columns if mean/median is selected
+                    logger.warning(f"Column {col} is non-numeric. Using mode instead of {self.method}.")
+                    self.fill_values[col] = X[col].mode()[0]
+                    logger.info(f"Mode value for {col}: {self.fill_values[col]}")
+            elif self.method == 'mode':
+                self.fill_values[col] = X[col].mode()[0]
+                logger.info(f"Mode value for {col}: {self.fill_values[col]}")
+
+        return self
+
+    def transform(self, X):
+        """
+        Handle missing values in the data according to the fitted values.
+
+        Args:
+            X (pd.DataFrame): Input data
+
+        Returns:
+            pd.DataFrame: Transformed data with missing values handled
+        """
+        X_transformed = X.copy()
+
+        if self.method == 'drop':
+            # Drop rows with missing values
+            rows_before = len(X_transformed)
+            X_transformed = X_transformed.dropna(subset=self.columns)
+            rows_after = len(X_transformed)
+            rows_dropped = rows_before - rows_after
+
+            if rows_dropped > 0:
+                logger.info(f"Dropped {rows_dropped} rows with missing values")
+
+            return X_transformed
+
+        if not self.columns or not self.fill_values:
+            logger.warning("No columns or fill values available for missing value handling")
+            return X_transformed
+
+        for col in self.columns:
+            if col not in X_transformed.columns or col not in self.fill_values:
+                continue
+
+            # Count missing values before filling
+            missing_count = X_transformed[col].isna().sum()
+
+            if missing_count > 0:
+                # Fill missing values
+                X_transformed[col] = X_transformed[col].fillna(self.fill_values[col])
+                logger.info(f"Filled {missing_count} missing values in {col} with {self.fill_values[col]}")
+
+        return X_transformed
+
+
+class SkewedDataHandler(BaseEstimator, TransformerMixin):
+    """
+    Custom transformer for handling skewed data using power transformers.
+    """
+
+    def __init__(self, method: str = 'yeo-johnson', columns: List[str] = None):
+        """
+        Initialize the SkewedDataHandler.
+
+        Args:
+            method (str): Method to use for handling skewed data ('yeo-johnson' or 'box-cox')
+            columns (List[str]): List of columns to handle skewed data for
+        """
+        self.method = method
+        self.columns = columns
+        self.transformers = {}
+
+        # Validate method
+        if method not in ['yeo-johnson', 'box-cox']:
+            raise ValueError("Method must be either 'yeo-johnson' or 'box-cox'")
+
+        logger.info(f"Initialized SkewedDataHandler with method: {method}")
+
+    def fit(self, X, y=None):
+        """
+        Fit power transformers for skewed data handling.
+
+        Args:
+            X (pd.DataFrame): Input data
+            y: Ignored
+
+        Returns:
+            self
+        """
+        # Only process if columns are provided
+        if not self.columns:
+            logger.warning("No columns provided for skewed data handling")
+            return self
+
+        # Fit transformer for each column
+        for col in self.columns:
+            if col not in X.columns:
+                logger.warning(f"Column {col} not found in input data")
+                continue
+
+            # Create and fit transformer
+            transformer = PowerTransformer(method=self.method, standardize=True)
+
+            # Box-Cox requires positive values
+            if self.method == 'box-cox' and X[col].min() <= 0:
+                logger.warning(f"Column {col} has values <= 0, which is incompatible with Box-Cox transform.")
+                logger.warning(f"Shifting data to positive values for Box-Cox transformation")
+                shift_value = abs(X[col].min()) + 1.0  # Add 1 to ensure all values are positive
+                self.transformers[col] = {'transformer': transformer, 'shift': shift_value}
+                # Fit transformer on shifted data
+                transformer.fit(X[col].add(shift_value).values.reshape(-1, 1))
+            else:
+                self.transformers[col] = {'transformer': transformer, 'shift': 0.0}
+                # Fit transformer
+                transformer.fit(X[col].values.reshape(-1, 1))
+
+            logger.info(f"Fitted power transformer for {col}")
+
+        return self
+
+    def transform(self, X):
+        """
+        Transform skewed data using fitted power transformers.
+
+        Args:
+            X (pd.DataFrame): Input data
+
+        Returns:
+            pd.DataFrame: Transformed data with skewed data handled
+        """
+        X_transformed = X.copy()
+
+        if not self.columns or not self.transformers:
+            logger.warning("No columns or transformers available for skewed data handling")
+            return X_transformed
+
+        for col in self.columns:
+            if col not in X_transformed.columns or col not in self.transformers:
+                continue
+
+            # Get transformer and shift value
+            transformer = self.transformers[col]['transformer']
+            shift_value = self.transformers[col]['shift']
+
+            # Apply transformation
+            if shift_value > 0:
+                # Apply shift before transformation
+                transformed_values = transformer.transform(X_transformed[col].add(shift_value).values.reshape(-1, 1))
+            else:
+                transformed_values = transformer.transform(X_transformed[col].values.reshape(-1, 1))
+
+            # Replace original values with transformed values
+            X_transformed[col] = transformed_values.flatten()
+            logger.info(f"Transformed skewed data in {col}")
+
+        return X_transformed
+
+
+class NumericalScaler(BaseEstimator, TransformerMixin):
+    """
+    Custom transformer for scaling numerical features.
+    """
+
+    def __init__(self, method: str = 'standard', columns: List[str] = None):
+        """
+        Initialize the NumericalScaler.
+
+        Args:
+            method (str): Method to use for scaling ('standard', 'robust', 'minmax')
+            columns (List[str]): List of columns to scale
+        """
+        self.method = method
+        self.columns = columns
+        self.scalers = {}
+
+        # Validate method
+        if method not in ['standard', 'robust', 'minmax']:
+            raise ValueError("Method must be one of 'standard', 'robust', or 'minmax'")
+
+        logger.info(f"Initialized NumericalScaler with method: {method}")
+
+    def fit(self, X, y=None):
+        """
+        Fit scalers for numerical features.
+
+        Args:
+            X (pd.DataFrame): Input data
+            y: Ignored
+
+        Returns:
+            self
+        """
+        # Only process if columns are provided
+        if not self.columns:
+            logger.warning("No columns provided for scaling")
+            return self
+
+        # Initialize and fit scaler for each column
+        for col in self.columns:
+            if col not in X.columns:
+                logger.warning(f"Column {col} not found in input data")
+                continue
+
+            # Create and fit appropriate scaler
+            if self.method == 'standard':
+                scaler = StandardScaler()
+            elif self.method == 'robust':
+                scaler = RobustScaler()
+            elif self.method == 'minmax':
+                scaler = MinMaxScaler()
+
+            # Fit scaler
+            scaler.fit(X[col].values.reshape(-1, 1))
+            self.scalers[col] = scaler
+            logger.info(f"Fitted {self.method} scaler for {col}")
+
+        return self
+
+    def transform(self, X):
+        """
+        Scale numerical features using fitted scalers.
+
+        Args:
+            X (pd.DataFrame): Input data
+
+        Returns:
+            pd.DataFrame: Transformed data with scaled numerical features
+        """
+        X_transformed = X.copy()
+
+        if not self.columns or not self.scalers:
+            logger.warning("No columns or scalers available for scaling")
+            return X_transformed
+
+        for col in self.columns:
+            if col not in X_transformed.columns or col not in self.scalers:
+                continue
+
+            # Get scaler for this column
+            scaler = self.scalers[col]
+
+            # Apply scaling
+            scaled_values = scaler.transform(X_transformed[col].values.reshape(-1, 1))
+            X_transformed[col] = scaled_values.flatten()
+            logger.info(f"Scaled numerical features in {col}")
+
+        return X_transformed
+
+
+class CategoricalEncoder(BaseEstimator, TransformerMixin):
+    """
+    Custom transformer for encoding categorical features.
+    """
+
+    def __init__(self, method: str = 'onehot', columns: List[str] = None, drop_first: bool = True):
+        """
+        Initialize the CategoricalEncoder.
+
+        Args:
+            method (str): Method to use for encoding ('onehot', 'label', 'dummies')
+            columns (List[str]): List of columns to encode
+            drop_first (bool): Whether to drop the first category in one-hot encoding
+        """
+        self.method = method
+        self.columns = columns
+        self.drop_first = drop_first
+        self.encoders = {}
+        self.dummy_columns = {}
+
+        # Validate method
+        if method not in ['onehot', 'label', 'dummies']:
+            raise ValueError("Method must be one of 'onehot', 'label', or 'dummies'")
+
+        logger.info(f"Initialized CategoricalEncoder with method: {method}")
+
+    def fit(self, X, y=None):
+        """
+        Fit encoders for categorical features.
+
+        Args:
+            X (pd.DataFrame): Input data
+            y: Ignored
+
+        Returns:
+            self
+        """
+        # Only process if columns are provided
+        if not self.columns:
+            logger.warning("No columns provided for categorical encoding")
+            return self
+
+        # Initialize and fit encoder for each column
+        for col in self.columns:
+            if col not in X.columns:
+                logger.warning(f"Column {col} not found in input data")
+                continue
+
+            if self.method == 'onehot':
+                encoder = OneHotEncoder(
+                    sparse_output=False,
+                    drop='first' if self.drop_first else None,
+                    handle_unknown='ignore'  # Add this parameter
+                )
+                encoder.fit(X[col].values.reshape(-1, 1))
+                self.encoders[col] = encoder
+                logger.info(f"Fitted OneHotEncoder for {col}")
+
+                # Store feature names for later
+                feature_names = encoder.get_feature_names_out([col])
+                self.dummy_columns[col] = feature_names.tolist()
+
+            elif self.method == 'label':
+                encoder = LabelEncoder()
+                encoder.fit(X[col])
+                self.encoders[col] = encoder
+                logger.info(f"Fitted LabelEncoder for {col}")
+
+            elif self.method == 'dummies':
+                # For 'dummies' method, we'll just store unique values
+                # actual transformation will be done in transform method
+                unique_values = X[col].unique()
+                self.encoders[col] = unique_values
+
+                # Create dummy column names (will be used during transform)
+                dummy_cols = [f"{col}_{val}" for val in unique_values]
+                if self.drop_first:
+                    dummy_cols = dummy_cols[1:]
+                self.dummy_columns[col] = dummy_cols
+
+                logger.info(f"Stored unique values for pd.get_dummies for {col}")
+
+        return self
+
+    def transform(self, X):
+        """
+        Encode categorical features using fitted encoders.
+
+        Args:
+            X (pd.DataFrame): Input data
+
+        Returns:
+            pd.DataFrame: Transformed data with encoded categorical features
+        """
+        X_transformed = X.copy()
+
+        if not self.columns or not self.encoders:
+            logger.warning("No columns or encoders available for categorical encoding")
+            return X_transformed
+
+        for col in self.columns:
+            if col not in X_transformed.columns or col not in self.encoders:
+                continue
+
+            if self.method == 'onehot':
+                # Apply one-hot encoding
+                encoder = self.encoders[col]
+                encoded_array = encoder.transform(X_transformed[col].values.reshape(-1, 1))
+
+                # Create DataFrame with encoded values
+                encoded_df = pd.DataFrame(
+                    encoded_array,
+                    columns=self.dummy_columns[col],
+                    index=X_transformed.index
+                )
+
+                # Drop original column and join encoded columns
+                X_transformed = X_transformed.drop(columns=[col])
+                X_transformed = pd.concat([X_transformed, encoded_df], axis=1)
+                logger.info(f"Applied OneHotEncoder to {col}, created {len(self.dummy_columns[col])} new columns")
+
+            elif self.method == 'label':
+                # Apply label encoding
+                encoder = self.encoders[col]
+                X_transformed[col] = encoder.transform(X_transformed[col])
+                logger.info(f"Applied LabelEncoder to {col}")
+
+            elif self.method == 'dummies':
+                # Use pandas.get_dummies
+                dummies = pd.get_dummies(X_transformed[col], prefix=col, drop_first=self.drop_first, dtype=int)
+
+                # Drop original column and join dummy columns
+                X_transformed = X_transformed.drop(columns=[col])
+                X_transformed = pd.concat([X_transformed, dummies], axis=1)
+
+                # Check for any missing dummy columns that were in the training data
+                expected_dummy_cols = set(self.dummy_columns[col])
+                actual_dummy_cols = set([col for col in dummies.columns])
+
+                # Add missing dummy columns (with all zeros)
+                for missing_col in expected_dummy_cols - actual_dummy_cols:
+                    X_transformed[missing_col] = 0
+
+                logger.info(f"Applied pd.get_dummies to {col}, created {dummies.shape[1]} new columns")
+
+        return X_transformed
+
+class IdentityTransformer(BaseEstimator, TransformerMixin):
+    """A transformer that returns the data unchanged."""
+
+    def __init__(self):
+        self.logger = logging.getLogger("Feature Engineering")
+        self.logger.info("Initializing IdentityTransformer")
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        return X
+
+
+class FeatureToolsTransformer(BaseEstimator, TransformerMixin):
+    """A transformer that uses featuretools to create new features."""
+
+    def __init__(self, target_col: str):
+        self.logger = logging.getLogger("Feature Engineering")
+        self.logger.info("Initializing FeatureToolsTransformer")
+        self.target_col = target_col
+        self.feature_defs = None
+        self.feature_names = None
+
         try:
-            train_df = pd.read_csv(train_path, low_memory=False)
-            logger.info(f"Loaded training data: {train_df.shape[0]} rows × {train_df.shape[1]} columns")
+            import featuretools as ft
+            self.ft = ft
+        except ImportError:
+            self.logger.error("Featuretools package not found. Please install with: pip install featuretools")
+            raise
+
+    def fit(self, X, y=None):
+        try:
+            es = self.ft.EntitySet(id="features")
+            X_copy = X.copy()
+
+            if X_copy.index.name is None:
+                X_copy = X_copy.reset_index(drop=True)
+                index_name = "index"
+            else:
+                index_name = X_copy.index.name
+
+            es.add_dataframe(
+                dataframe_name="data",
+                dataframe=X_copy,
+                index=index_name,
+                make_index=True,
+                time_index=None
+            )
+
+            feature_matrix, feature_defs = self.ft.dfs(
+                entityset=es,
+                target_dataframe_name="data",
+                trans_primitives=["add_numeric", "multiply_numeric", "divide_numeric", "subtract_numeric"],
+                max_depth=1,
+                features_only=False,
+                verbose=True
+            )
+
+            self.feature_defs = feature_defs
+            self.feature_names = [col for col in feature_matrix.columns if self.target_col not in col]
+            self.logger.info(f"Generated {len(self.feature_names)} features using featuretools")
+            return self
+
         except Exception as e:
-            logger.error(f"Failed to load training data: {str(e)}")
-            return
+            self.logger.error(f"Error in FeatureToolsTransformer fit: {str(e)}")
+            raise
 
-        # Load test data if available
-        test_df = None
-        if has_test:
-            logger.info(f"Loading test data from {test_path}")
-            try:
-                test_df = pd.read_csv(test_path, low_memory=False)
-                logger.info(f"Loaded test data: {test_df.shape[0]} rows × {test_df.shape[1]} columns")
-            except Exception as e:
-                logger.error(f"Failed to load test data: {str(e)}")
-                has_test = False
+    def transform(self, X):
+        try:
+            X_copy = X.copy()
 
-        # Fit the cleaning pipeline on training data
-        logger.info("Fitting cleaning pipeline on training data")
-        cleaner.fit(train_df, dataset_name)
+            if X_copy.index.name is None:
+                X_copy = X_copy.reset_index(drop=True)
+                index_name = "index"
+            else:
+                index_name = X_copy.index.name
 
-        # Transform training data
-        logger.info("Transforming training data")
-        cleaned_train = cleaner.transform(train_df)
+            es = self.ft.EntitySet(id="features_transform")
+            es.add_dataframe(
+                dataframe_name="data",
+                dataframe=X_copy,
+                index=index_name,
+                make_index=True,
+                time_index=None
+            )
 
-        # Transform test data if available
-        cleaned_test = None
-        if has_test and test_df is not None:
-            logger.info("Transforming test data")
-            cleaned_test = cleaner.transform(test_df)
+            feature_matrix = self.ft.calculate_feature_matrix(
+                features=self.feature_defs,
+                entityset=es,
+                verbose=True
+            )
 
-        # Save cleaned data
-        cleaned_train_path = os.path.join(cleaned_dir, "train.csv")
-        logger.info(f"Saving cleaned training data to {cleaned_train_path}")
-        cleaned_train.to_csv(cleaned_train_path, index=False)
+            feature_matrix = feature_matrix.replace([np.inf, -np.inf], np.nan).fillna(0)
+            feature_matrix = feature_matrix[self.feature_names]
 
-        if has_test and cleaned_test is not None:
-            cleaned_test_path = os.path.join(cleaned_dir, "test.csv")
-            logger.info(f"Saving cleaned test data to {cleaned_test_path}")
-            cleaned_test.to_csv(cleaned_test_path, index=False)
+            for col in feature_matrix.columns:
+                if not pd.api.types.is_numeric_dtype(feature_matrix[col]):
+                    feature_matrix = feature_matrix.drop(columns=[col])
 
-        # Save the cleaning pipeline
-        cleaning_pipeline_path = os.path.join(pipeline_dir, "cleaning.pkl")
-        logger.info(f"Saving cleaning pipeline to {cleaning_pipeline_path}")
-        cleaner.save(cleaning_pipeline_path)
+            return feature_matrix
 
-        # Generate and save cleaning report
-        report_path = os.path.join('reports/readme/', "cleaning_report.md")
-        logger.info(f"Generating cleaning report at {report_path}")
-        cleaner.save_cleaning_report(report_path)
-
-        # Update intel.yaml with cleaning information
-        update_dict = {
-            'cleaned_train_path': cleaned_train_path,
-            'cleaning_pipeline_path': cleaning_pipeline_path,
-            'cleaning_report_path': report_path,
-            'cleaning_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-
-        if has_test:
-            update_dict['cleaned_test_path'] = cleaned_test_path
-
-        cleaner._update_intel_config(dataset_name, update_dict)
-
-        logger.info("Data cleaning completed successfully")
-
-    except Exception as e:
-        logger.error(f"Error in data cleaning process: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
+        except Exception as e:
+            self.logger.error(f"Error in FeatureToolsTransformer transform: {str(e)}")
+            raise
 
 
-if __name__ == "__main__":
-    import argparse
+class SHAPFeatureSelector(BaseEstimator, TransformerMixin):
+    """A transformer that uses SHAP values to select important features."""
 
-    parser = argparse.ArgumentParser(description="Clean raw data for machine learning.")
-    parser.add_argument("--dataset", type=str, help="Name of the dataset to clean")
+    def __init__(self, n_features: int = 20, model=None):
+        self.logger = logging.getLogger("Feature Engineering")
+        self.logger.info(f"Initializing SHAPFeatureSelector with n_features={n_features}")
+        self.n_features = n_features
+        self.selected_features = None
+        self.importance_df = None
+        self.model = model or RandomForestRegressor(n_estimators=100, random_state=42)
 
-    args = parser.parse_args()
-    main(args.dataset)
+        try:
+            import shap
+            self.shap = shap
+        except ImportError:
+            self.logger.error("SHAP package not found. Please install with: pip install shap")
+            raise
+
+    def fit(self, X, y=None):
+        try:
+            X_copy = X.copy()
+            feature_names = list(X_copy.columns)
+            self.n_features = min(self.n_features, len(feature_names))
+
+            if X_copy.shape[0] < 10:
+                self.selected_features = feature_names
+                return self
+
+            self.model.fit(X_copy, y)
+
+            if hasattr(self.model, 'estimators_'):
+                explainer = self.shap.TreeExplainer(self.model)
+                shap_values = explainer.shap_values(X_copy)
+            else:
+                sample_size = min(100, int(X_copy.shape[0] * 0.2))
+                background = self.shap.kmeans(X_copy, sample_size)
+                explainer = self.shap.KernelExplainer(self.model.predict, background)
+                shap_values = explainer.shap_values(X_copy.sample(n=min(200, X_copy.shape[0])))
+
+            if isinstance(shap_values, list):
+                shap_values = shap_values[0]
+
+            feature_importance = np.abs(shap_values).mean(axis=0)
+            self.importance_df = pd.DataFrame({
+                'feature': feature_names,
+                'importance': feature_importance
+            }).sort_values('importance', ascending=False)
+
+            self.selected_features = self.importance_df['feature'].head(self.n_features).tolist()
+            return self
+
+        except Exception as e:
+            self.logger.error(f"Error in SHAPFeatureSelector fit: {str(e)}")
+            self.selected_features = list(X.columns)
+            return self
+
+    def transform(self, X):
+        try:
+            X_copy = X.copy()
+            available_features = [f for f in self.selected_features if f in X_copy.columns]
+            return X_copy[available_features]
+        except Exception as e:
+            self.logger.error(f"Error in SHAPFeatureSelector transform: {str(e)}")
+            return X

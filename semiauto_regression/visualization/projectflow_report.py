@@ -8,12 +8,6 @@ from pathlib import Path
 import datetime
 import matplotlib
 
-with open('intel.yaml', 'r') as f:
-    config = yaml.safe_load(f)
-    dataset_name = config['dataset_name']
-
-matplotlib.use('Agg')  # Use non-interactive backend
-
 
 class CustomPDF(FPDF):
     def __init__(self, bg_color, *args, **kwargs):

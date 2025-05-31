@@ -56,7 +56,7 @@ except ImportError:
 # Import the custom logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
-from src.logger import section, configure_logger  # Configure logger
+from semiauto_regression.logger import section, configure_logger  # Configure logger
 
 # Configure logger
 configure_logger()

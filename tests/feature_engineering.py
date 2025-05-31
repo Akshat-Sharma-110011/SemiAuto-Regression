@@ -28,7 +28,7 @@ sys.path.append(parent_dir)
 
 # Import custom logger
 import logging
-from src.logger import section, configure_logger
+from semiauto_regression.logger import section, configure_logger
 
 with open('intel.yaml', 'r') as f:
     config = yaml.safe_load(f)
