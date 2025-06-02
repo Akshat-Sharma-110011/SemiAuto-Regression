@@ -1,0 +1,8 @@
+evaluation_timestamp: '2025-06-01 02:06:31'
+explained_variance_score: 0.9221207158786632
+max_error: 9.527349482857467
+mean_absolute_error: 1.8031677365186687
+mean_absolute_percentage_error: 0.10152139668238337
+mean_squared_error: 5.712056238986909
+r2_score: 0.9221088017987676
+root_mean_squared_error: 2.389990844958806

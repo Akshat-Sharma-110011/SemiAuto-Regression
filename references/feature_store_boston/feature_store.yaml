@@ -1,0 +1,120 @@
+original_cols:
+- CRIM
+- ZN
+- INDUS
+- CHAS
+- NOX
+- RM
+- AGE
+- DIS
+- RAD
+- TAX
+- PTRATIO
+- B
+- LSTAT
+- MEDV
+numerical_cols:
+- ZN
+- INDUS
+- CHAS
+- NOX
+- RM
+- AGE
+- DIS
+- RAD
+- TAX
+- PTRATIO
+- B
+- LSTAT
+- MEDV
+categorical_cols: []
+id_cols:
+- CRIM
+skewed_cols:
+- ZN
+- CHAS
+- NOX
+- AGE
+- DIS
+- RAD
+- TAX
+- PTRATIO
+- B
+- LSTAT
+- MEDV
+normal_cols:
+- INDUS
+- RM
+contains_null: []
+contains_outliers:
+- ZN
+- CHAS
+- RM
+- DIS
+- PTRATIO
+- B
+- LSTAT
+- MEDV
+correlated_cols:
+  ZN:
+  - column: DIS
+    correlation: 0.6644082227621105
+  INDUS:
+  - column: NOX
+    correlation: 0.7636514469209139
+  - column: DIS
+    correlation: -0.7080269887427675
+  - column: TAX
+    correlation: 0.7207601799515422
+  NOX:
+  - column: INDUS
+    correlation: 0.7636514469209139
+  - column: AGE
+    correlation: 0.7314701037859592
+  - column: DIS
+    correlation: -0.7692301132258282
+  - column: TAX
+    correlation: 0.6680232004030217
+  RM:
+  - column: MEDV
+    correlation: 0.6953599470715401
+  AGE:
+  - column: NOX
+    correlation: 0.7314701037859592
+  - column: DIS
+    correlation: -0.747880540868632
+  DIS:
+  - column: ZN
+    correlation: 0.6644082227621105
+  - column: INDUS
+    correlation: -0.7080269887427675
+  - column: NOX
+    correlation: -0.7692301132258282
+  - column: AGE
+    correlation: -0.747880540868632
+  RAD:
+  - column: TAX
+    correlation: 0.9102281885331865
+  TAX:
+  - column: INDUS
+    correlation: 0.7207601799515422
+  - column: NOX
+    correlation: 0.6680232004030217
+  - column: RAD
+    correlation: 0.9102281885331865
+  LSTAT:
+  - column: MEDV
+    correlation: -0.7376627261740145
+  MEDV:
+  - column: RM
+    correlation: 0.6953599470715401
+  - column: LSTAT
+    correlation: -0.7376627261740145
+target_col: MEDV
+timestamp: '2025-06-01 02:01:43'
+train_size: 0.8
+test_size: 0.2
+dataset_name: boston
+original_file_name: boston.csv
+train_rows: 404
+test_rows: 102
