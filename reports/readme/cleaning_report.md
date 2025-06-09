@@ -1,11 +1,11 @@
 # Data Cleaning Report
 
-Generated at: 2025-06-01 02:01:48
+Generated at: 2025-06-04 11:37:36
 
 ## Summary
 
-* Starting shape: 102 rows × 14 columns
-* Ending shape: 102 rows × 14 columns
+* Starting shape: 8 rows × 6 columns
+* Ending shape: 8 rows × 6 columns
 * Columns dropped: 0
 * Rows dropped: 0
 * Columns fixed/modified: 0

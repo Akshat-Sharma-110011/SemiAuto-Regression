@@ -1,35 +1,35 @@
-best_params_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports\metrics\best_params_boston\params.json
-cleaned_test_path: data\cleaned\data_boston\test.csv
-cleaned_train_path: data\cleaned\data_boston\train.csv
-cleaning_pipeline_path: model\pipelines\preprocessing_boston\cleaning.pkl
+best_params_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports\metrics\best_params_final_cleaned_energy_data_for_modeling\params.json
+cleaned_test_path: data\cleaned\data_final_cleaned_energy_data_for_modeling\test.csv
+cleaned_train_path: data\cleaned\data_final_cleaned_energy_data_for_modeling\train.csv
+cleaning_pipeline_path: model\pipelines\preprocessing_final_cleaned_energy_data_for_modeling\cleaning.pkl
 cleaning_report_path: reports/readme/cleaning_report.md
-cleaning_timestamp: '2025-06-01 02:01:48'
-dataset_name: boston
-evaluation_timestamp: '2025-06-01 02:06:31'
+cleaning_timestamp: '2025-06-04 11:37:36'
+dataset_name: final_cleaned_energy_data_for_modeling
+evaluation_timestamp: '2025-06-04 11:47:37'
 feature_engineering_config:
-  n_features_selected: 100
-  timestamp: '2025-06-01 02:04:32'
+  n_features_selected: 20
+  timestamp: '2025-06-04 11:45:48'
   use_feature_tools: true
   use_shap_selection: true
-feature_store_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\references\feature_store_boston\feature_store.yaml
+feature_store_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\references\feature_store_final_cleaned_energy_data_for_modeling\feature_store.yaml
 model_name: CatBoost
-model_path: model\model_boston\model.pkl
-model_timestamp: '2025-06-01 02:05:15'
-optimization_timestamp: '2025-06-01 02:06:31'
-optimized_evaluation_timestamp: '2025-06-01 02:06:31'
-optimized_model_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\model\model_boston\optimized_model.pkl
-optimized_performance_metrics_path: reports\metrics\performance_boston\optimized_performance.yaml
-original_file_name: boston.csv
-performance_metrics_path: reports\metrics\performance_boston\performance.yaml
-plots_dir: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports/figures\plots_boston
-preprocessing_pipeline_path: model\pipelines\preprocessing_boston\preprocessing.pkl
-processed_timestamp: '2025-06-01 02:03:16'
-processor_pipeline_path: model\pipelines\preprocessing_boston\processor.pkl
-target_column: MEDV
-test_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_boston\test.csv
-test_preprocessed_path: data\interim\data_boston\test_preprocessed.csv
-test_transformed_path: data\processed\data_boston\test_transformed.csv
-train_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_boston\train.csv
-train_preprocessed_path: data\interim\data_boston\train_preprocessed.csv
-train_transformed_path: data\processed\data_boston\train_transformed.csv
-transformation_pipeline_path: model\pipelines\preprocessing_boston\transformation.pkl
+model_path: model\model_final_cleaned_energy_data_for_modeling\model.pkl
+model_timestamp: '2025-06-04 11:46:16'
+optimization_timestamp: '2025-06-04 11:47:37'
+optimized_evaluation_timestamp: '2025-06-04 11:47:37'
+optimized_model_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\model\model_final_cleaned_energy_data_for_modeling\optimized_model.pkl
+optimized_performance_metrics_path: reports\metrics\performance_final_cleaned_energy_data_for_modeling\optimized_performance.yaml
+original_file_name: final_cleaned_energy_data_for_modeling.csv
+performance_metrics_path: reports\metrics\performance_final_cleaned_energy_data_for_modeling\performance.yaml
+plots_dir: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\reports/figures\plots_final_cleaned_energy_data_for_modeling
+preprocessing_pipeline_path: model\pipelines\preprocessing_final_cleaned_energy_data_for_modeling\preprocessing.pkl
+processed_timestamp: '2025-06-04 11:45:38'
+processor_pipeline_path: model\pipelines\preprocessing_final_cleaned_energy_data_for_modeling\processor.pkl
+target_column: energy_megawatt
+test_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_final_cleaned_energy_data_for_modeling\test.csv
+test_preprocessed_path: data\interim\data_final_cleaned_energy_data_for_modeling\test_preprocessed.csv
+test_transformed_path: data\processed\data_final_cleaned_energy_data_for_modeling\test_transformed.csv
+train_path: D:\MLOps-Projects\SemiAuto\SemiAuto-Regression\data\raw\data_final_cleaned_energy_data_for_modeling\train.csv
+train_preprocessed_path: data\interim\data_final_cleaned_energy_data_for_modeling\train_preprocessed.csv
+train_transformed_path: data\processed\data_final_cleaned_energy_data_for_modeling\train_transformed.csv
+transformation_pipeline_path: model\pipelines\preprocessing_final_cleaned_energy_data_for_modeling\transformation.pkl
